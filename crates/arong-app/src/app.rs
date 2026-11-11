@@ -3113,27 +3113,19 @@ impl Controller {
 
     // ---- 집 ----
 
-    /// 지금 화면에 보이는 아롱이(가까이 있으면 방석·집도 함께)를 PNG로 저장한다.
+    /// 지금 화면에 보이는 아롱이를 PNG로 저장한다(배경 투명).
     /// 화면을 캡처하는 것이 아니라 앱이 가진 그림 레이어만 다시 그리므로, 다른 창이나 바탕화면은 찍히지 않는다.
     fn save_photo(&self, path: &std::path::Path) -> bool {
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext};
         use objc2_core_graphics::CGContext;
         let iv = self.ivars();
         let Some(panel) = iv.panel.get() else { return false };
-        let pet = (!iv.inside.get() && !iv.hidden.get()).then(|| (panel.frame(), panel.contentView().and_then(|v| v.layer())));
-        let house = iv.house.borrow().clone().map(|h| (h.frame(), h.contentView().and_then(|v| v.layer())));
-        // 집은 아롱이 가까이에 있을 때만 같이 찍는다(멀리 있으면 사진이 화면만큼 커진다).
-        let near = |a: CGRect, b: CGRect| {
-            (a.origin.x - b.origin.x).abs() < 500.0 && (a.origin.y - b.origin.y).abs() < 400.0
-        };
+        // 아롱이만 찍는다. 방석·집은 넣지 않는다.
         let mut parts: Vec<(CGRect, Retained<CALayer>)> = Vec::new();
-        if let Some((frame, Some(layer))) = house {
-            if pet.as_ref().is_none_or(|(pf, _)| near(*pf, frame)) {
-                parts.push((frame, layer));
+        if !iv.inside.get() && !iv.hidden.get() {
+            if let Some(layer) = panel.contentView().and_then(|v| v.layer()) {
+                parts.push((panel.frame(), layer));
             }
-        }
-        if let Some((frame, Some(layer))) = pet {
-            parts.push((frame, layer));
         }
         if parts.is_empty() {
             return false;
