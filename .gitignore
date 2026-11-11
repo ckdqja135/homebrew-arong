@@ -1,0 +1,7 @@
+target/
+dist/
+# 더 이상 쓰지 않는 예전 그림(빌드에 필요 없음)
+assets/v1/
+assets/v2/
+.DS_Store
+__pycache__/
