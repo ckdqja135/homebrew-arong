@@ -337,6 +337,8 @@ pub struct Ivars {
     /// 착용 중인 장식의 (너비, 높이, 시점별 머리 기준 위치[3/4, 옆, 정면]) px.
     acc_shapes: Cell<[Option<(f64, f64, [(f64, f64); 3])>; 3]>,
     house: RefCell<Option<Retained<NSPanel>>>,
+    /// 방석·집을 화면에서 치워 두었는지.
+    house_hidden: Cell<bool>,
     /// (누른 위치, 창 원점 − 커서, 드래그로 판정됨).
     house_drag: Cell<Option<(CGPoint, CGPoint, bool)>>,
     /// 타이핑 집계: 사용자가 켰는지, 잠깐 멈췄는지, 실제로 돌고 있는 탭.
@@ -1332,6 +1334,43 @@ define_class!(
             self.set_size_level(2);
         }
 
+        // 다른 프로세스가 보낸 "사진 찍어 줘" 알림. 아롱이 그림만 앱 데이터 폴더에 저장한다.
+        #[unsafe(method(photoRequested:))]
+        fn photo_requested(&self, _n: &NSNotification) {
+            let Some(dir) = crate::store::data_dir() else { return };
+            self.save_photo(&dir.join("photo.png"));
+        }
+
+        #[unsafe(method(takePhoto:))]
+        fn take_photo(&self, _s: Option<&AnyObject>) {
+            let mtm = self.mtm();
+            let panel = NSSavePanel::savePanel(mtm);
+            panel.setNameFieldStringValue(ns_string!("arong.png"));
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            if panel.runModal() != 1 {
+                return;
+            }
+            let Some(path) = panel.URL().and_then(|u| u.path()).map(|p| p.to_string()) else { return };
+            let ok = self.save_photo(std::path::Path::new(&path));
+            self.bubble(if ok { "찰칵! 사진을 저장했어요" } else { "사진을 저장하지 못했어요" });
+        }
+
+        #[unsafe(method(toggleHouse:))]
+        fn toggle_house(&self, _s: Option<&AnyObject>) {
+            let iv = self.ivars();
+            iv.house_hidden.set(!iv.house_hidden.get());
+            self.save_flag("house_hidden", iv.house_hidden.get());
+            if iv.house_hidden.get() {
+                // 집 안에 있거나 드나드는 중이었다면 밖으로 나오게 한다.
+                self.wake();
+                self.stop_roam();
+            }
+            self.apply_house();
+            let name = self.house_word();
+            self.bubble(&if iv.house_hidden.get() { format!("{name} 숨김") } else { format!("{name} 다시 놓음") });
+        }
+
         #[unsafe(method(toggleHidden:))]
         fn toggle_hidden(&self, _s: Option<&AnyObject>) {
             let iv = self.ivars();
@@ -1432,6 +1471,7 @@ impl Controller {
         }
         let flag = |key: &str, default: bool| store.as_ref().map_or(default, |s| s.setting_bool(key, default));
         let roaming = flag("roam", true);
+        let house_hidden = flag("house_hidden", false);
         // 크기 설정. 예전의 "크게 보기" 설정만 있으면 그것을 이어받는다.
         let size_level = store
             .as_ref()
@@ -1497,6 +1537,7 @@ impl Controller {
             acc_layers: OnceCell::new(),
             acc_shapes: Cell::new([None; 3]),
             house: RefCell::new(None),
+            house_hidden: Cell::new(house_hidden),
             house_drag: Cell::new(None),
             typing_on: Cell::new(typing_on),
             typing_paused: Cell::new(typing_paused),
@@ -1631,6 +1672,15 @@ impl Controller {
             }
         }
 
+        // "사진 찍어 줘" 알림을 받으면 아롱이 그림을 데이터 폴더에 저장한다(받을 때만 깨어난다).
+        unsafe {
+            objc2_foundation::NSDistributedNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                self,
+                sel!(photoRequested:),
+                Some(ns_string!("dev.cbsong.arong.photo")),
+                None,
+            );
+        }
         if let Some(store) = &iv.store {
             store.set_setting("launched", "1");
         }
@@ -2099,6 +2149,10 @@ impl Controller {
         add("항상 위에 표시", Some(sel!(toggleTop:)), iv.always_on_top.get());
         add("위치 고정 (끌기·혼자 걷기 잠금)", Some(sel!(toggleLock:)), iv.locked.get());
         add("혼자 걷기 (좌우로 돌아다님)", Some(sel!(toggleRoam:)), iv.roaming.get());
+        if iv.pet.borrow().house_level > 0 {
+            // 가진 것이 방석이면 "방석 숨기기", 집이면 "집 숨기기"로 보여 준다.
+            add(&format!("{} 숨기기", self.house_word()), Some(sel!(toggleHouse:)), iv.house_hidden.get());
+        }
         let level = iv.size_level.get();
         add("크기: 작게", Some(sel!(sizeSmall:)), level == 0);
         add("크기: 중간", Some(sel!(sizeMedium:)), level == 1);
@@ -2147,6 +2201,7 @@ impl Controller {
         if let Some(version) = iv.new_version.borrow().as_ref() {
             add(&format!("  새 버전 {version} 있음 · 업데이트 명령 복사"), Some(sel!(copyUpdateCommand:)), false);
         }
+        add("사진 찍기…", Some(sel!(takePhoto:)), false);
         add("육성 데이터 내보내기…", Some(sel!(exportData:)), false);
         add("육성 데이터 가져오기…", Some(sel!(importData:)), false);
         add("보상 규칙…", Some(sel!(editRewards:)), false);
@@ -3058,6 +3113,73 @@ impl Controller {
 
     // ---- 집 ----
 
+    /// 지금 화면에 보이는 아롱이(가까이 있으면 방석·집도 함께)를 PNG로 저장한다.
+    /// 화면을 캡처하는 것이 아니라 앱이 가진 그림 레이어만 다시 그리므로, 다른 창이나 바탕화면은 찍히지 않는다.
+    fn save_photo(&self, path: &std::path::Path) -> bool {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext};
+        use objc2_core_graphics::CGContext;
+        let iv = self.ivars();
+        let Some(panel) = iv.panel.get() else { return false };
+        let pet = (!iv.inside.get() && !iv.hidden.get()).then(|| (panel.frame(), panel.contentView().and_then(|v| v.layer())));
+        let house = iv.house.borrow().clone().map(|h| (h.frame(), h.contentView().and_then(|v| v.layer())));
+        // 집은 아롱이 가까이에 있을 때만 같이 찍는다(멀리 있으면 사진이 화면만큼 커진다).
+        let near = |a: CGRect, b: CGRect| {
+            (a.origin.x - b.origin.x).abs() < 500.0 && (a.origin.y - b.origin.y).abs() < 400.0
+        };
+        let mut parts: Vec<(CGRect, Retained<CALayer>)> = Vec::new();
+        if let Some((frame, Some(layer))) = house {
+            if pet.as_ref().is_none_or(|(pf, _)| near(*pf, frame)) {
+                parts.push((frame, layer));
+            }
+        }
+        if let Some((frame, Some(layer))) = pet {
+            parts.push((frame, layer));
+        }
+        if parts.is_empty() {
+            return false;
+        }
+        let pad = 6.0;
+        let x0 = parts.iter().map(|(f, _)| f.origin.x).fold(f64::MAX, f64::min) - pad;
+        let y0 = parts.iter().map(|(f, _)| f.origin.y).fold(f64::MAX, f64::min) - pad;
+        let x1 = parts.iter().map(|(f, _)| f.origin.x + f.size.width).fold(f64::MIN, f64::max) + pad;
+        let y1 = parts.iter().map(|(f, _)| f.origin.y + f.size.height).fold(f64::MIN, f64::max) + pad;
+        // 2배로 그려서 또렷하게 남긴다.
+        let k = 2.0;
+        let (w, h) = (((x1 - x0) * k) as isize, ((y1 - y0) * k) as isize);
+        if w <= 0 || h <= 0 || w > 4000 || h > 4000 {
+            return false;
+        }
+        // SAFETY: planes에 NULL을 주면 rep가 버퍼를 직접 할당하고 소유한다.
+        let rep = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(), std::ptr::null_mut(), w, h, 8, 4, true, false, NSDeviceRGBColorSpace, w * 4, 32,
+            )
+        };
+        let Some(rep) = rep else { return false };
+        let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep) else { return false };
+        let cg = context.CGContext();
+        CGContext::scale_ctm(Some(&cg), k, k);
+        for (frame, layer) in &parts {
+            CGContext::save_g_state(Some(&cg));
+            CGContext::translate_ctm(Some(&cg), frame.origin.x - x0, frame.origin.y - y0);
+            layer.renderInContext(&cg);
+            CGContext::restore_g_state(Some(&cg));
+        }
+        let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new()) };
+        let Some(png) = png else { return false };
+        let ok = std::fs::write(path, png.to_vec()).is_ok();
+        if ok {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        ok
+    }
+
+    /// 지금 가진 것을 부르는 말: 1단계는 방석, 그 위로는 집.
+    fn house_word(&self) -> &'static str {
+        if self.ivars().pet.borrow().house_level <= 1 { "방석" } else { "집" }
+    }
+
     fn house_size(&self) -> CGSize {
         // 집은 아롱이 크기 설정을 따라간다(중간일 때 가로 128pt).
         let k = 2.0 * self.scale();
@@ -3069,7 +3191,8 @@ impl Controller {
         let mtm = self.mtm();
         let iv = self.ivars();
         let Some(pet_panel) = iv.panel.get() else { return };
-        let level = iv.pet.borrow().house_level;
+        // 집을 숨겨 두었으면 집이 없는 것처럼 다룬다(산 집과 단계는 그대로 남는다).
+        let level = if iv.house_hidden.get() { 0 } else { iv.pet.borrow().house_level };
         let Some(image) = crate::art::house_art(level).and_then(|a| a.cg_image()) else {
             if let Some(old) = iv.house.take() {
                 old.orderOut(None);
