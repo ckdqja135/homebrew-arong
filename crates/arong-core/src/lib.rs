@@ -4,8 +4,10 @@
 pub mod ai;
 pub mod pet;
 pub mod shop;
+pub mod training;
 pub mod walk;
 
+pub use training::{Command, TrainResult};
 pub use shop::{HOUSE_NAMES, ITEMS, MAX_HOUSE_LEVEL, Purchase, Slot};
 pub use pet::{ActionResult, DayCounters, Pet, Stage, Tuning};
 pub use walk::{Follower, Vec2, WalkMeter, WalkTuning};

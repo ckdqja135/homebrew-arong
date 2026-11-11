@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arong_core::{DayCounters, MAX_HOUSE_LEVEL, Pet, Slot, shop};
+use arong_core::{Command, DayCounters, MAX_HOUSE_LEVEL, Pet, Slot, shop};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::otel::Sample;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const DB_NAME: &str = "arong.sqlite";
 const BACKUP_NAME: &str = "arong.sqlite.bak";
 
@@ -133,6 +133,16 @@ fn migrate(conn: &Connection, from: i64) -> rusqlite::Result<()> {
              COMMIT;",
         )?;
     }
+    if from < 7 {
+        // 훈련: 명령별 숙련도와 오늘의 보상 횟수.
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE pet ADD COLUMN day_trains INTEGER NOT NULL DEFAULT 0;
+             CREATE TABLE IF NOT EXISTS skills (command TEXT PRIMARY KEY, mastery INTEGER NOT NULL);
+             PRAGMA user_version = 7;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -194,6 +204,16 @@ impl Store {
             .into_iter()
             .filter(|id| shop::item(id).is_some())
             .collect();
+        let skills: BTreeMap<Command, u8> = self
+            .conn
+            .prepare("SELECT command, mastery FROM skills")
+            .and_then(|mut st| {
+                st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, mastery)| Some((Command::from_key(&key)?, mastery.clamp(0, 100) as u8)))
+            .collect();
         // 착용 정보도 믿지 않는다: 가진 아이템이고 부위가 맞을 때만 받아들인다.
         let worn: BTreeMap<Slot, String> = self
             .conn
@@ -212,7 +232,7 @@ impl Store {
             .query_row(
                 "SELECT xp, coins, coin_carry, satiety, mood, affinity, last_wall,
                         day_date, day_feeds, day_pets, day_walks, hat, house_level, day_keys, key_carry,
-                        day_tok_in, day_tok_out, day_tok_cr, day_tok_cc, day_ai_units, ai_carry, day_xp
+                        day_tok_in, day_tok_out, day_tok_cr, day_tok_cc, day_ai_units, ai_carry, day_xp, day_trains
                  FROM pet WHERE id = 1",
                 [],
                 |r| {
@@ -239,10 +259,12 @@ impl Store {
                             ],
                             ai_units: r.get::<_, i64>(19)?.max(0) as u64,
                             xp: r.get::<_, i64>(21)?.max(0) as u64,
+                            trains: r.get::<_, i64>(22)?.clamp(0, 1_000_000) as u32,
                         },
                         worn: worn.clone(),
                         house_level: r.get::<_, i64>(12)?.clamp(0, MAX_HOUSE_LEVEL as i64) as u32,
                         owned: owned.clone(),
+                        skills: skills.clone(),
                         key_carry: r.get::<_, i64>(14)?.clamp(0, 9_999) as u64,
                         ai_carry: r.get::<_, i64>(20)?.clamp(0, 9_999_999) as u64,
                     })
@@ -258,9 +280,9 @@ impl Store {
             "INSERT OR REPLACE INTO pet
              (id, xp, coins, coin_carry, satiety, mood, affinity, last_wall,
               day_date, day_feeds, day_pets, day_walks, hat, house_level, day_keys, key_carry,
-              day_tok_in, day_tok_out, day_tok_cr, day_tok_cc, day_ai_units, ai_carry, day_xp)
+              day_tok_in, day_tok_out, day_tok_cr, day_tok_cc, day_ai_units, ai_carry, day_xp, day_trains)
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 p.xp as i64,
                 p.coins,
@@ -283,11 +305,15 @@ impl Store {
                 p.day.tokens[3] as i64,
                 p.day.ai_units as i64,
                 p.ai_carry as i64,
-                p.day.xp as i64
+                p.day.xp as i64,
+                p.day.trains
             ],
         )?;
         for id in &p.owned {
             conn.execute("INSERT OR IGNORE INTO inventory (item_id) VALUES (?1)", params![id])?;
+        }
+        for (command, mastery) in &p.skills {
+            conn.execute("INSERT OR REPLACE INTO skills (command, mastery) VALUES (?1, ?2)", params![command.key(), mastery])?;
         }
         conn.execute("DELETE FROM worn", [])?;
         for (slot, id) in &p.worn {
@@ -387,6 +413,7 @@ impl Store {
                         pets: n(8)? as u32,
                         walks: n(9)? as u32,
                         ai_units: 0,
+                        trains: 0,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()
@@ -433,6 +460,6 @@ impl Store {
 
     /// 육성 데이터 초기화. 설정(위치·크기)은 남긴다.
     pub fn delete_pet(&self) {
-        let _ = self.conn.execute_batch("BEGIN; DELETE FROM pet; DELETE FROM inventory; DELETE FROM worn; DELETE FROM ai_series; DELETE FROM daily; COMMIT;");
+        let _ = self.conn.execute_batch("BEGIN; DELETE FROM pet; DELETE FROM inventory; DELETE FROM worn; DELETE FROM skills; DELETE FROM ai_series; DELETE FROM daily; COMMIT;");
     }
 }

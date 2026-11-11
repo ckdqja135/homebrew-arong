@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::shop::Slot;
+use crate::training::Command;
 
 /// 조정 가능한 초기값. 확정값이 아니라 써 보면서 바꾸는 숫자들이다.
 #[derive(Debug, Clone)]
@@ -45,6 +46,15 @@ pub struct Tuning {
     pub ai_full_points: u64,
     pub ai_half_points: u64,
     pub ai_points_per_xp: u64,
+    /// 훈련: 성공·실패 때 오르는 숙련도, 성공 보상 XP와 하루 보상 횟수, 성공 때 오르는 기분.
+    pub train_mastery_success: u8,
+    pub train_mastery_fail: u8,
+    pub train_xp: u64,
+    pub train_xp_per_day: u32,
+    pub train_mood: f64,
+    /// 밥·간식을 줄 때 오르는 친밀도.
+    pub feed_affinity: u64,
+    pub snack_affinity: u64,
 }
 
 impl Default for Tuning {
@@ -82,6 +92,13 @@ impl Default for Tuning {
             ai_full_points: 100_000,
             ai_half_points: 300_000,
             ai_points_per_xp: 1_000,
+            train_mastery_success: 6,
+            train_mastery_fail: 2,
+            train_xp: 3,
+            train_xp_per_day: 20,
+            train_mood: 2.0,
+            feed_affinity: 1,
+            snack_affinity: 2,
         }
     }
 }
@@ -109,6 +126,8 @@ pub struct DayCounters {
     pub ai_units: u64,
     /// 오늘 얻은 경험치(모든 경로 합계).
     pub xp: u64,
+    /// 오늘 보상을 받은 훈련 성공 횟수.
+    pub trains: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +152,8 @@ pub struct Pet {
     pub key_carry: u64,
     /// AI 포인트 → XP 환산의 이월분.
     pub ai_carry: u64,
+    /// 명령별 숙련도(0~100).
+    pub skills: BTreeMap<Command, u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -178,6 +199,7 @@ impl Pet {
             house_level: 0,
             key_carry: 0,
             ai_carry: 0,
+            skills: BTreeMap::new(),
         }
     }
 
@@ -248,6 +270,7 @@ impl Pet {
     /// 기본 사료는 무료·무제한. XP만 하루 횟수 제한이 있다.
     pub fn feed(&mut self, t: &Tuning) -> ActionResult {
         self.satiety = (self.satiety + t.feed_satiety).min(100.0);
+        self.affinity += t.feed_affinity;
         let xp = if self.day.feeds < t.feed_xp_per_day { t.feed_xp } else { 0 };
         self.day.feeds += 1;
         self.grant_xp(t, xp)
@@ -260,6 +283,7 @@ impl Pet {
         self.coins -= t.snack_price;
         self.satiety = (self.satiety + t.snack_satiety).min(100.0);
         self.mood = (self.mood + t.snack_mood).min(100.0);
+        self.affinity += t.snack_affinity;
         let mut r = self.grant_xp(t, 0);
         r.coins -= t.snack_price;
         r

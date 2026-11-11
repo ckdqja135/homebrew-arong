@@ -7,7 +7,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use arong_core::{ActionResult, Follower, Pet, Purchase, Slot, Stage, Tuning, Vec2, WalkMeter, WalkTuning};
+use arong_core::{ActionResult, Command, Follower, Pet, Purchase, Slot, Stage, Tuning, Vec2, WalkMeter, WalkTuning};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
@@ -37,8 +37,10 @@ const FPS: f64 = 9.0;
 const WALK_HZ: f64 = 30.0;
 /// 집에 들어가거나 나오는 데 걸리는 시간(초).
 const DOORWAY_SECS: f64 = 1.1;
+/// "말로 하기"를 누른 뒤 마이크를 열어 두는 시간(초).
+const VOICE_SECS: f64 = 5.0;
 /// 가장 깊이 들어갔을 때 줄어드는 정도와, 흐려지기 시작하는 진행도.
-const DOORWAY_SHRINK: f64 = 0.58;
+const DOORWAY_SHRINK: f64 = 0.68;
 const DOORWAY_FADE_FROM: f64 = 0.55;
 /// 이 거리(pt) 미만으로 움직이고 놓으면 드래그가 아니라 쓰다듬기.
 const CLICK_SLOP: f64 = 4.0;
@@ -160,8 +162,10 @@ enum Act {
     Roll,
     /// 앉아서 밥그릇 앞에서 먹는다.
     Eat,
-    /// 엎드린 채로 머문다(방석 위).
+    /// 엎드린 채로 머문다(방석 위, "엎드려").
     LieStay,
+    /// 앉은 채로 머문다("앉아").
+    SitStay,
     /// 서서 혀를 내밀고 헥헥거린다.
     Pant,
     /// 정면을 바라본다.
@@ -223,6 +227,10 @@ enum TileAction {
     More,
     Shop,
     MainMenu,
+    /// 훈련 화면, 명령 하나 훈련하기, 말로 명령하기.
+    Training,
+    Train(Command),
+    Voice,
     /// 상점의 부위별 목록.
     Category(Slot),
     Item(&'static str),
@@ -282,7 +290,8 @@ pub struct Ivars {
     status_item: OnceCell<Retained<NSStatusItem>>,
     menu: OnceCell<Retained<NSMenu>>,
     atlas: RefCell<Option<Atlas>>,
-    big: Cell<bool>,
+    /// 표시 크기: 0 = 작게, 1 = 중간, 2 = 크게.
+    size_level: Cell<u8>,
     always_on_top: Cell<bool>,
     locked: Cell<bool>,
     hidden: Cell<bool>,
@@ -339,6 +348,11 @@ pub struct Ivars {
     update_on: Cell<Option<bool>>,
     update_timer: RefCell<Option<Retained<NSTimer>>>,
     new_version: RefCell<Option<String>>,
+    /// 음성 명령: 사용자가 켰는지, 지금 듣고 있는 중이면 그 리스너와 타이머, 듣기를 끝낼 시각.
+    voice_on: Cell<bool>,
+    listener: RefCell<Option<crate::voice::Listener>>,
+    voice_timer: RefCell<Option<Retained<NSTimer>>>,
+    voice_until: Cell<Option<Instant>>,
     /// AI 사용량 집계: 사용자가 켰는지, 실제로 돌고 있는 루프백 수신기.
     ai_on: Cell<bool>,
     receiver: RefCell<Option<crate::otel::Receiver>>,
@@ -622,6 +636,7 @@ define_class!(
             self.end_walk(false);
             self.stop_roam();
             self.end_drag();
+            self.stop_listening();
             self.flush_typing();
             self.ivars().keytap.replace(None);
             self.flush_ai();
@@ -824,10 +839,11 @@ define_class!(
                 self.rest();
             }
             // 2) 타일 메뉴들.
-            let panels: [(&str, &dyn Fn()); 3] = [
+            let panels: [(&str, &dyn Fn()); 4] = [
                 ("tiles_main.png", &|| self.open_main_tiles()),
                 ("tiles_shop.png", &|| self.open_shop_tiles()),
                 ("tiles_shoes.png", &|| self.open_category_tiles(Slot::Shoes)),
+                ("tiles_training.png", &|| self.open_training_tiles()),
             ];
             for (name, open) in panels {
                 open();
@@ -1174,6 +1190,35 @@ define_class!(
             self.bubble("업데이트 명령을 복사했어요. 터미널에 붙여 넣으세요");
         }
 
+        #[unsafe(method(toggleVoice:))]
+        fn toggle_voice(&self, _s: Option<&AnyObject>) {
+            let iv = self.ivars();
+            if iv.voice_on.get() {
+                self.stop_listening();
+                iv.voice_on.set(false);
+                self.save_flag("voice", false);
+                self.bubble("음성 명령 끔");
+            } else {
+                self.enable_voice();
+            }
+        }
+
+        #[unsafe(method(voiceTick:))]
+        fn voice_tick(&self, _t: &NSTimer) {
+            let iv = self.ivars();
+            let heard = iv.listener.borrow().as_ref().and_then(|l| l.heard());
+            if let Some(command) = heard {
+                // 알아들었으면 바로 마이크를 닫고 명령을 따른다.
+                self.stop_listening();
+                self.do_command(command);
+                self.refresh_training_tiles();
+            } else if iv.voice_until.get().is_none_or(|until| Instant::now() >= until) {
+                self.stop_listening();
+                self.bubble("못 알아들었어요. 다시 눌러서 말해 주세요");
+                self.refresh_training_tiles();
+            }
+        }
+
         #[unsafe(method(toggleAi:))]
         fn toggle_ai(&self, _s: Option<&AnyObject>) {
             let iv = self.ivars();
@@ -1272,12 +1317,19 @@ define_class!(
             self.bubble(if iv.locked.get() { "위치 고정 켬" } else { "위치 고정 끔" });
         }
 
-        #[unsafe(method(toggleBig:))]
-        fn toggle_big(&self, _s: Option<&AnyObject>) {
-            let iv = self.ivars();
-            iv.big.set(!iv.big.get());
-            self.save_flag("big", iv.big.get());
-            self.apply_size();
+        #[unsafe(method(sizeSmall:))]
+        fn size_small(&self, _s: Option<&AnyObject>) {
+            self.set_size_level(0);
+        }
+
+        #[unsafe(method(sizeMedium:))]
+        fn size_medium(&self, _s: Option<&AnyObject>) {
+            self.set_size_level(1);
+        }
+
+        #[unsafe(method(sizeLarge:))]
+        fn size_large(&self, _s: Option<&AnyObject>) {
+            self.set_size_level(2);
         }
 
         #[unsafe(method(toggleHidden:))]
@@ -1380,14 +1432,23 @@ impl Controller {
         }
         let flag = |key: &str, default: bool| store.as_ref().map_or(default, |s| s.setting_bool(key, default));
         let roaming = flag("roam", true);
+        // 크기 설정. 예전의 "크게 보기" 설정만 있으면 그것을 이어받는다.
+        let size_level = store
+            .as_ref()
+            .and_then(|s| s.setting("size"))
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| *v <= 2)
+            .unwrap_or(if flag("big", false) { 2 } else { 1 });
         // 기본값은 꺼짐. 사용자가 직접 켜야만 집계한다.
         let typing_on = flag("typing", false);
         let typing_paused = flag("typing_paused", false);
         let ai_on = flag("ai", false);
+        // 음성 명령도 기본은 꺼짐이다.
+        let voice_on = flag("voice", false);
         // 새 버전 확인은 물어본 적이 없으면 None이다. 동의하기 전에는 접속하지 않는다.
         let update_on = store.as_ref().and_then(|s| s.setting("update_check")).map(|v| v == "1");
         let ivars = Ivars {
-            big: Cell::new(flag("big", true)),
+            size_level: Cell::new(size_level),
             always_on_top: Cell::new(flag("always_on_top", true)),
             locked: Cell::new(flag("locked", false)),
             hidden: Cell::new(flag("hidden", false)),
@@ -1444,6 +1505,10 @@ impl Controller {
             update_on: Cell::new(update_on),
             update_timer: RefCell::new(None),
             new_version: RefCell::new(None),
+            voice_on: Cell::new(voice_on),
+            listener: RefCell::new(None),
+            voice_timer: RefCell::new(None),
+            voice_until: Cell::new(None),
             ai_on: Cell::new(ai_on),
             receiver: RefCell::new(None),
             rng: Cell::new(now_wall() as u64 | 1),
@@ -1596,9 +1661,24 @@ impl Controller {
         self.size() * HEAD_ROOM_PX / CELL as f64
     }
 
+    /// 그림 1px이 차지하는 화면 pt. 중간(1배)과 크게(1.5배)는 레티나에서 화면 픽셀에 딱 맞고,
+    /// 작게(0.75배)는 딱 맞지 않아 부드럽게 줄여 그린다.
+    fn scale(&self) -> f64 {
+        [0.75, 1.0, 1.5][self.ivars().size_level.get().min(2) as usize]
+    }
+
+    fn set_size_level(&self, level: u8) {
+        let iv = self.ivars();
+        iv.size_level.set(level);
+        if let Some(store) = &iv.store {
+            store.set_setting("size", &level.to_string());
+        }
+        self.finish_doorway();
+        self.apply_size();
+    }
+
     fn size(&self) -> f64 {
-        // 레티나에서 그림 1px이 화면 2px 또는 3px에 딱 맞도록 1배와 1.5배만 쓴다.
-        CELL as f64 * if self.ivars().big.get() { 1.5 } else { 1.0 }
+        CELL as f64 * self.scale()
     }
 
     fn apply_level(&self) {
@@ -1748,9 +1828,10 @@ impl Controller {
         CATransaction::setDisableActions(true);
         // SAFETY: CGImage는 CALayer.contents로 쓸 수 있는 CF 객체이고, 레이어가 retain한다.
         unsafe { body.setContents(Some(&*(CFRetained::as_ptr(&frame.image).as_ptr() as *const AnyObject))) };
-        // 제 크기로 그리는 그림은 최근접으로 또렷하게, 크기를 바꿔 그리는 걷기 그림은 선형으로 매끄럽게.
+        // 화면 픽셀에 딱 맞는 그림은 최근접으로 또렷하게, 그렇지 않은 경우(걷기 그림, 작게 보기)는 선형으로 매끄럽게.
+        let small = iv.size_level.get() == 0;
         body.setMagnificationFilter(unsafe {
-            if frame.view == View::Side { objc2_quartz_core::kCAFilterLinear } else { objc2_quartz_core::kCAFilterNearest }
+            if frame.view == View::Side || small { objc2_quartz_core::kCAFilterLinear } else { objc2_quartz_core::kCAFilterNearest }
         });
         // 그림이 있는 영역만 덮는다(스프라이트 px → 레이어 좌표, y는 위가 +).
         body.setFrame(CGRect::new(CGPoint::new(bx * k, (cell - by - bh) * k), CGSize::new(bw * k, bh * k)));
@@ -1767,6 +1848,7 @@ impl Controller {
             for (layer, shape) in layers.iter().zip(iv.acc_shapes.get()) {
                 // 구르는 동안처럼 머리 위치를 알 수 없는 프레임에서는 장식을 잠깐 숨긴다.
                 layer.setHidden(!frame.wearable);
+                layer.setMagnificationFilter(unsafe { if small { objc2_quartz_core::kCAFilterLinear } else { objc2_quartz_core::kCAFilterNearest } });
                 if let Some((w, h, offsets)) = shape {
                     let (dx, dy) = offsets[match frame.view {
                         View::Quarter => 0,
@@ -1820,6 +1902,7 @@ impl Controller {
                     list.extend(up(Motion::LieDown));
                 }
                 Act::LieStay => list.extend(down(Motion::LieDown)),
+                Act::SitStay => list.extend(down(Motion::Sit)),
                 Act::Pant => {
                     for _ in 0..4 {
                         list.extend(all(Motion::Pant));
@@ -1834,7 +1917,7 @@ impl Controller {
             }
         }
         iv.held.set(false);
-        iv.stay_after.set(matches!(act, Act::LieStay));
+        iv.stay_after.set(matches!(act, Act::LieStay | Act::SitStay));
         iv.bowl.set(matches!(act, Act::Eat));
         iv.script.replace(list.into());
         self.advance_script();
@@ -2016,7 +2099,10 @@ impl Controller {
         add("항상 위에 표시", Some(sel!(toggleTop:)), iv.always_on_top.get());
         add("위치 고정 (끌기·혼자 걷기 잠금)", Some(sel!(toggleLock:)), iv.locked.get());
         add("혼자 걷기 (좌우로 돌아다님)", Some(sel!(toggleRoam:)), iv.roaming.get());
-        add("크게 보기 (2배)", Some(sel!(toggleBig:)), iv.big.get());
+        let level = iv.size_level.get();
+        add("크기: 작게", Some(sel!(sizeSmall:)), level == 0);
+        add("크기: 중간", Some(sel!(sizeMedium:)), level == 1);
+        add("크기: 크게", Some(sel!(sizeLarge:)), level == 2);
         add("숨기기", Some(sel!(toggleHidden:)), iv.hidden.get());
         add("일시정지 (대기 동작 끔)", Some(sel!(togglePause:)), iv.paused.get());
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -2055,6 +2141,7 @@ impl Controller {
             objc2_service_management::SMAppService::mainAppService().status()
                 == objc2_service_management::SMAppServiceStatus::Enabled
         };
+        add("음성 명령 (훈련에서 누를 때만 마이크 사용)", Some(sel!(toggleVoice:)), iv.voice_on.get());
         add("Mac 켤 때 자동 실행", Some(sel!(toggleLogin:)), login_on);
         add("새 버전 확인 (하루 한 번 GitHub 접속)", Some(sel!(toggleUpdate:)), iv.update_on.get() == Some(true));
         if let Some(version) = iv.new_version.borrow().as_ref() {
@@ -2156,6 +2243,7 @@ impl Controller {
     /// 화면 꺼짐·숨김·모니터 변경 등: 진행 중인 움직임을 모두 안전하게 끝낸다.
     fn end_activity(&self) {
         self.close_tiles();
+        self.stop_listening();
         self.finish_doorway();
         self.end_walk(true);
         self.stop_roam();
@@ -2212,7 +2300,7 @@ impl Controller {
             tile(&["bag.fill", "cart.fill"], "상점", true, false, TileAction::Shop),
             tile(&["pawprint.fill"], "혼자 걷기", true, iv.roaming.get(), TileAction::Send(sel!(toggleRoam:))),
             tile(&["pin.fill"], "위치 고정", true, iv.locked.get(), TileAction::Send(sel!(toggleLock:))),
-            tile(&["eye.slash.fill"], "숨기기", true, false, TileAction::Send(sel!(toggleHidden:))),
+            tile(&["graduationcap.fill", "star.fill"], "훈련", true, false, TileAction::Training),
             tile(&["ellipsis.circle.fill", "ellipsis.circle"], "더보기", true, false, TileAction::More),
         ];
         self.show_tiles(
@@ -2405,7 +2493,7 @@ impl Controller {
             match &spec.icon {
                 TileIcon::Symbol(names) => {
                     icon.setImage(symbol(names, 24.0).as_deref());
-                    let tint = if spec.enabled { NSColor::labelColor() } else { NSColor::tertiaryLabelColor() };
+                    let tint = if spec.enabled { NSColor::labelColor() } else { NSColor::secondaryLabelColor() };
                     icon.setContentTintColor(Some(&tint));
                 }
                 TileIcon::Image(image) => {
@@ -2417,7 +2505,7 @@ impl Controller {
             }
             let caption = label(&spec.caption, 10.5, false, CGRect::new(CGPoint::new(1.0, 8.0), CGSize::new(TILE_W - 2.0, 15.0)));
             if !spec.enabled {
-                caption.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+                caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
             }
             tile.addSubview(&icon);
             tile.addSubview(&caption);
@@ -2453,6 +2541,15 @@ impl Controller {
                 }
             }
             TileAction::Shop => self.open_shop_tiles(),
+            TileAction::Training => self.open_training_tiles(),
+            TileAction::Train(command) => {
+                self.do_command(command);
+                self.open_training_tiles();
+            }
+            TileAction::Voice => {
+                self.start_listening();
+                self.open_training_tiles();
+            }
             TileAction::MainMenu => self.open_main_tiles(),
             TileAction::Category(slot) => self.open_category_tiles(slot),
             TileAction::Item(id) => {
@@ -2550,6 +2647,203 @@ impl Controller {
         if r.leveled_up {
             self.bubble(&format!("Lv {}!", iv.pet.borrow().level()));
         }
+    }
+
+    // ---- 훈련 ----
+
+    fn open_training_tiles(&self) {
+        let iv = self.ivars();
+        let (level, affinity, rows) = self.with_pet(|p, _| {
+            (p.level(), p.affinity, Command::ALL.map(|c| (c, p.locked(c), p.mastery(c))))
+        });
+        let mut tiles = Vec::new();
+        for (command, locked, mastery) in rows {
+            let symbols: &'static [&'static str] = match command {
+                Command::Sit => &["arrow.down.to.line.compact", "arrow.down.to.line"],
+                Command::PawLeft => &["hand.point.left.fill"],
+                Command::PawRight => &["hand.point.right.fill"],
+                Command::LieDown => &["bed.double.fill"],
+                Command::StandUp => &["arrow.up.to.line.compact", "arrow.up.to.line"],
+            };
+            let (icon, caption) = match locked {
+                Some((need_level, need_affinity)) => {
+                    (TileIcon::Symbol(&["lock.fill"]), format!("{} · Lv{need_level} 친밀{need_affinity}", command.name()))
+                }
+                None => (TileIcon::Symbol(symbols), format!("{} · {mastery}%", command.name())),
+            };
+            tiles.push(TileSpec { icon, caption, enabled: locked.is_none(), active: false, action: TileAction::Train(command) });
+        }
+        let listening = iv.listener.borrow().is_some();
+        tiles.push(TileSpec {
+            icon: TileIcon::Symbol(&["mic.fill"]),
+            caption: if listening { "듣는 중…" } else { "말로 하기" }.to_string(),
+            enabled: true,
+            active: listening,
+            action: TileAction::Voice,
+        });
+        tiles.push(TileSpec {
+            icon: TileIcon::Symbol(&["arrow.uturn.backward.circle.fill", "arrow.uturn.backward"]),
+            caption: "돌아가기".to_string(),
+            enabled: true,
+            active: false,
+            action: TileAction::MainMenu,
+        });
+        self.show_tiles(&format!("훈련 · Lv {level} · 친밀도 {affinity}"), "눌러서 시키기 · % 는 숙련도(높을수록 잘 따라 해요)", tiles);
+    }
+
+    /// 훈련 화면이 열려 있으면 숙련도와 "듣는 중" 표시를 새로 그린다.
+    fn refresh_training_tiles(&self) {
+        if self.ivars().tiles_open.get() {
+            self.open_training_tiles();
+        }
+    }
+
+    /// 명령 하나를 시킨다(타일로든 말로든 여기로 온다).
+    fn do_command(&self, command: Command) {
+        let iv = self.ivars();
+        self.wake_from_house();
+        if let Some((level, affinity)) = iv.pet.borrow().locked(command) {
+            self.bubble(&format!("{}는 Lv {level} · 친밀도 {affinity}부터 배울 수 있어요", command.name()));
+            return;
+        }
+        if iv.walk.borrow().is_some() || iv.roam.borrow().is_some() || iv.doorway.borrow().is_some() {
+            self.bubble("지금은 걷는 중이에요");
+            return;
+        }
+        // "일어서"는 앉거나 엎드려 있을 때만 의미가 있다.
+        if command == Command::StandUp && !iv.held.get() {
+            self.bubble("이미 서 있어요");
+            return;
+        }
+        let roll = (self.next_random() % 100) as u8;
+        let Some(result) = self.with_pet(|p, t| p.train(t, command, roll)) else { return };
+        self.save();
+        self.reload_atlas_if_needed();
+        let name = command.name();
+        if result.success {
+            match command {
+                Command::Sit => self.perform(Act::SitStay),
+                Command::LieDown => self.perform(Act::LieStay),
+                Command::PawLeft => self.perform(Act::Paw(true)),
+                Command::PawRight => self.perform(Act::Paw(false)),
+                Command::StandUp => self.get_up(),
+            }
+            let xp = if result.reward.xp > 0 { format!(" · +{} XP", result.reward.xp) } else { String::new() };
+            self.bubble(&format!("{name}! 잘했어 · 숙련 {}%{xp}", result.mastery));
+        } else {
+            // 못 알아들으면 갸웃하며 바라본다. "일어서"를 못 알아들으면 그대로 있는다.
+            if !iv.held.get() {
+                self.perform(Act::Look);
+            }
+            self.bubble(&format!("{name}…? 갸웃 · 숙련 {}%", result.mastery));
+        }
+    }
+
+    /// 앉거나 엎드려 머무는 중이면 일어서는 동작을 재생한다.
+    fn get_up(&self) {
+        let iv = self.ivars();
+        if !iv.held.get() {
+            return;
+        }
+        let motion = iv.motion.get();
+        let list: Vec<(Motion, usize)> = match iv.atlas.borrow().as_ref() {
+            Some(a) => (a.hold(motion)..a.len(motion)).map(|i| (motion, i)).collect(),
+            None => return,
+        };
+        iv.held.set(false);
+        iv.stay_after.set(false);
+        iv.script.replace(list.into());
+        self.advance_script();
+        if iv.anim_timer.borrow().is_none() {
+            iv.anim_timer.replace(Some(self.timer(1.0 / FPS, sel!(animTick:), true, 0.02)));
+        }
+    }
+
+    /// 집 안에 있으면 문 앞으로 나오게 한다(앉거나 엎드린 자세는 그대로 둔다).
+    fn wake_from_house(&self) {
+        if self.ivars().inside.get() || self.ivars().doorway.borrow().is_some() {
+            self.wake();
+        }
+    }
+
+    // ---- 음성 명령 ----
+
+    /// 무엇을 듣는지 설명하고 동의를 받은 뒤 macOS 권한을 요청한다.
+    fn enable_voice(&self) {
+        let iv = self.ivars();
+        let mtm = self.mtm();
+        if !crate::voice::supported() {
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(ns_string!("이 Mac에서는 음성 명령을 쓸 수 없어요"));
+            alert.setInformativeText(ns_string!(
+                "아롱이는 소리를 외부로 보내지 않기 위해 '기기 안 음성 인식'만 씁니다. 이 Mac은 한국어 기기 안 인식을 지원하지 않거나, 앱이 정식 번들로 실행되지 않았습니다. 훈련은 타일을 눌러서 그대로 할 수 있어요."
+            ));
+            alert.runModal();
+            return;
+        }
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(ns_string!("말로 훈련할까요? (마이크 사용)"));
+        alert.setInformativeText(ns_string!(
+            "훈련 화면에서 '말로 하기'를 누르면 몇 초 동안만 마이크로 듣고, 앉아·왼손·오른손·엎드려·일어서 중 어느 말인지 알아냅니다.\n\n· 평소에는 마이크를 열지 않습니다. 버튼을 누른 뒤 몇 초뿐입니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다.\n· 소리와 인식된 문장은 저장하지 않습니다. 다섯 명령 중 어느 것인지만 씁니다.\n\n계속하면 macOS가 '음성 인식'과 '마이크' 권한을 차례로 묻습니다. 더보기 메뉴에서 언제든 끌 수 있습니다."
+        ));
+        alert.addButtonWithTitle(ns_string!("취소"));
+        alert.addButtonWithTitle(ns_string!("켜기"));
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        if alert.runModal() != 1001 {
+            return;
+        }
+        iv.voice_on.set(true);
+        self.save_flag("voice", true);
+        if crate::voice::permission() == crate::voice::Permission::NotAsked {
+            crate::voice::request_permission();
+            self.bubble("권한을 허용한 뒤 '말로 하기'를 눌러 주세요");
+        } else {
+            self.bubble("음성 명령 켬 · 훈련에서 '말로 하기'를 눌러 주세요");
+        }
+    }
+
+    /// "말로 하기": 몇 초 동안 듣는다. 꺼져 있으면 먼저 동의를 받는다.
+    fn start_listening(&self) {
+        let iv = self.ivars();
+        if !iv.voice_on.get() {
+            self.enable_voice();
+            return;
+        }
+        if iv.listener.borrow().is_some() {
+            self.stop_listening();
+            return;
+        }
+        match crate::voice::permission() {
+            crate::voice::Permission::NotAsked => {
+                crate::voice::request_permission();
+                self.bubble("권한을 허용한 뒤 다시 눌러 주세요");
+                return;
+            }
+            crate::voice::Permission::Denied => {
+                self.bubble("시스템 설정에서 아롱이의 음성 인식을 허용해 주세요");
+                return;
+            }
+            crate::voice::Permission::Allowed => {}
+        }
+        match crate::voice::Listener::start() {
+            Ok(listener) => {
+                iv.listener.replace(Some(listener));
+                iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_SECS)));
+                Self::stop(&iv.voice_timer);
+                iv.voice_timer.replace(Some(self.timer(0.15, sel!(voiceTick:), true, 0.05)));
+                self.bubble("듣고 있어요… 앉아 / 왼손 / 오른손 / 엎드려 / 일어서");
+            }
+            Err(reason) => self.bubble(reason),
+        }
+    }
+
+    /// 듣기를 끝낸다. 리스너를 버리는 순간 마이크가 닫힌다.
+    fn stop_listening(&self) {
+        let iv = self.ivars();
+        Self::stop(&iv.voice_timer);
+        iv.voice_until.set(None);
+        iv.listener.replace(None);
     }
 
     // ---- 새 버전 확인 ----
@@ -2765,8 +3059,8 @@ impl Controller {
     // ---- 집 ----
 
     fn house_size(&self) -> CGSize {
-        // 아롱이가 드나들 만한 크기로 보이도록 넉넉하게 키운다.
-        let k = if self.ivars().big.get() { 4.5 } else { 3.0 };
+        // 집은 아롱이 크기 설정을 따라간다(중간일 때 가로 128pt).
+        let k = 2.0 * self.scale();
         CGSize::new(crate::art::HOUSE_W as f64 * k, crate::art::HOUSE_H as f64 * k)
     }
 

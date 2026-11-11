@@ -6,6 +6,7 @@ mod otel;
 mod sprites;
 mod store;
 mod update;
+mod voice;
 
 use objc2::MainThreadMarker;
 use objc2::runtime::ProtocolObject;

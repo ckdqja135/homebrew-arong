@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use arong_core::{MAX_HOUSE_LEVEL, Pet, Slot, shop};
+use arong_core::{Command, MAX_HOUSE_LEVEL, Pet, Slot, shop};
 use serde_json::{Value, json};
 
 const FORMAT: &str = "arong-save";
@@ -16,6 +16,7 @@ pub const MAX_IMPORT_BYTES: u64 = 64 * 1024;
 
 pub fn export_json(p: &Pet) -> String {
     let worn: BTreeMap<&str, &str> = p.worn.iter().map(|(slot, id)| (slot.key(), id.as_str())).collect();
+    let skills: BTreeMap<&str, u8> = p.skills.iter().map(|(command, mastery)| (command.key(), *mastery)).collect();
     let value = json!({
         "format": FORMAT,
         "version": VERSION,
@@ -28,6 +29,7 @@ pub fn export_json(p: &Pet) -> String {
             "house_level": p.house_level,
             "owned": p.owned,
             "worn": worn,
+            "skills": skills,
         },
     });
     serde_json::to_string_pretty(&value).unwrap_or_default()
@@ -87,6 +89,16 @@ pub fn import_json(bytes: &[u8], now_wall: i64) -> Result<Pet, &'static str> {
         // 가지고 있고 부위가 맞는 것만 착용할 수 있다.
         if def.slot != slot || !out.wear(def.id) {
             return Err("착용 정보가 올바르지 않습니다");
+        }
+    }
+    // 훈련 숙련도는 없어도 된다(이전 형식의 파일).
+    if let Some(skills) = pet.get("skills").and_then(Value::as_object) {
+        for (key, mastery) in skills {
+            let command = Command::from_key(key).ok_or("파일 내용이 올바르지 않습니다")?;
+            match mastery.as_i64() {
+                Some(v) if (0..=100).contains(&v) => out.skills.insert(command, v as u8),
+                _ => return Err("값이 허용 범위를 벗어났습니다"),
+            };
         }
     }
     Ok(out)
