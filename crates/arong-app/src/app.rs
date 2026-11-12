@@ -37,8 +37,8 @@ const FPS: f64 = 9.0;
 const WALK_HZ: f64 = 30.0;
 /// 집에 들어가거나 나오는 데 걸리는 시간(초).
 const DOORWAY_SECS: f64 = 1.1;
-/// "말로 하기"를 누른 뒤 마이크를 열어 두는 시간(초).
-const VOICE_SECS: f64 = 5.0;
+/// 말로 훈련하는 동안, 마지막 명령 뒤로 이만큼(초) 아무 명령이 없으면 마이크를 닫는다.
+const VOICE_IDLE_SECS: f64 = 30.0;
 /// 가장 깊이 들어갔을 때 줄어드는 정도와, 흐려지기 시작하는 진행도.
 const DOORWAY_SHRINK: f64 = 0.68;
 const DOORWAY_FADE_FROM: f64 = 0.55;
@@ -1210,13 +1210,25 @@ define_class!(
             let iv = self.ivars();
             let heard = iv.listener.borrow().as_ref().and_then(|l| l.heard());
             if let Some(command) = heard {
-                // 알아들었으면 바로 마이크를 닫고 명령을 따른다.
-                self.stop_listening();
+                // 알아들은 명령을 따르고, 다음 명령을 위해 새로 듣기 시작한다.
+                // (인식기는 지금까지 들은 문장을 계속 이어 붙이므로, 매번 새로 열어야 같은 말이 두 번 처리되지 않는다.)
+                iv.listener.replace(None);
                 self.do_command(command);
+                match crate::voice::Listener::start() {
+                    Ok(listener) => {
+                        iv.listener.replace(Some(listener));
+                        iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
+                    }
+                    Err(reason) => {
+                        self.stop_listening();
+                        self.bubble(reason);
+                    }
+                }
                 self.refresh_training_tiles();
             } else if iv.voice_until.get().is_none_or(|until| Instant::now() >= until) {
+                // 한동안 명령이 없으면 마이크를 닫는다.
                 self.stop_listening();
-                self.bubble("못 알아들었어요. 다시 눌러서 말해 주세요");
+                self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
                 self.refresh_training_tiles();
             }
         }
@@ -2731,7 +2743,7 @@ impl Controller {
         let listening = iv.listener.borrow().is_some();
         tiles.push(TileSpec {
             icon: TileIcon::Symbol(&["mic.fill"]),
-            caption: if listening { "듣는 중…" } else { "말로 하기" }.to_string(),
+            caption: if listening { "듣는 중 · 끝내기" } else { "말로 훈련" }.to_string(),
             enabled: true,
             active: listening,
             action: TileAction::Voice,
@@ -2839,7 +2851,7 @@ impl Controller {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(ns_string!("말로 훈련할까요? (마이크 사용)"));
         alert.setInformativeText(ns_string!(
-            "훈련 화면에서 '말로 하기'를 누르면 몇 초 동안만 마이크로 듣고, 앉아·왼손·오른손·엎드려·일어서 중 어느 말인지 알아냅니다.\n\n· 평소에는 마이크를 열지 않습니다. 버튼을 누른 뒤 몇 초뿐입니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다.\n· 소리와 인식된 문장은 저장하지 않습니다. 다섯 명령 중 어느 것인지만 씁니다.\n\n계속하면 macOS가 '음성 인식'과 '마이크' 권한을 차례로 묻습니다. 더보기 메뉴에서 언제든 끌 수 있습니다."
+            "훈련 화면에서 '말로 훈련'을 누르면 마이크로 듣기 시작해서, 앉아·왼손·오른손·엎드려·일어서 중 어느 말인지 알아냅니다. 다시 누르거나 30초 동안 명령이 없으면 마이크를 닫습니다.\n\n· 평소에는 마이크를 열지 않습니다. '말로 훈련'을 켠 동안뿐입니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다.\n· 소리와 인식된 문장은 저장하지 않습니다. 다섯 명령 중 어느 것인지만 씁니다.\n\n계속하면 macOS가 '음성 인식'과 '마이크' 권한을 차례로 묻습니다. 더보기 메뉴에서 언제든 끌 수 있습니다."
         ));
         alert.addButtonWithTitle(ns_string!("취소"));
         alert.addButtonWithTitle(ns_string!("켜기"));
@@ -2852,13 +2864,14 @@ impl Controller {
         self.save_flag("voice", true);
         if crate::voice::permission() == crate::voice::Permission::NotAsked {
             crate::voice::request_permission();
-            self.bubble("권한을 허용한 뒤 '말로 하기'를 눌러 주세요");
+            self.bubble("권한을 허용한 뒤 '말로 훈련'을 눌러 주세요");
         } else {
-            self.bubble("음성 명령 켬 · 훈련에서 '말로 하기'를 눌러 주세요");
+            self.bubble("음성 명령 켬 · 훈련에서 '말로 훈련'을 눌러 주세요");
         }
     }
 
-    /// "말로 하기": 몇 초 동안 듣는다. 꺼져 있으면 먼저 동의를 받는다.
+    /// "말로 훈련": 누르면 듣기 시작해서 명령을 계속 받고, 다시 누르거나 한동안 말이 없으면 끝낸다.
+    /// 꺼져 있으면 먼저 동의를 받는다.
     fn start_listening(&self) {
         let iv = self.ivars();
         if !iv.voice_on.get() {
@@ -2867,6 +2880,7 @@ impl Controller {
         }
         if iv.listener.borrow().is_some() {
             self.stop_listening();
+            self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
             return;
         }
         match crate::voice::permission() {
@@ -2884,10 +2898,10 @@ impl Controller {
         match crate::voice::Listener::start() {
             Ok(listener) => {
                 iv.listener.replace(Some(listener));
-                iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_SECS)));
+                iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
                 Self::stop(&iv.voice_timer);
                 iv.voice_timer.replace(Some(self.timer(0.15, sel!(voiceTick:), true, 0.05)));
-                self.bubble("듣고 있어요… 앉아 / 왼손 / 오른손 / 엎드려 / 일어서");
+                self.bubble("말해 보세요: 앉아 / 왼손 / 오른손 / 엎드려 / 일어서 (끝내려면 다시 누르기)");
             }
             Err(reason) => self.bubble(reason),
         }
