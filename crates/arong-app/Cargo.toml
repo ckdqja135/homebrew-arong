@@ -1,10 +1,10 @@
 [package]
 name = "arong-app"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-arong-core = { version = "0.1.0", path = "../arong-core" }
+arong-core = { version = "0.2.0", path = "../arong-core" }
 block2 = "0.6.2"
 objc2 = { version = "0.6.5", features = ["exception"] }
 objc2-app-kit = "0.3.2"

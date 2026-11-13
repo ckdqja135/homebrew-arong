@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationDelegate, NSBackingStoreType, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSImage, NSImageSymbolConfiguration, NSImageView,
     NSFloatingWindowLevel, NSMenu, NSMenuDelegate, NSMenuItem, NSNormalWindowLevel, NSOpenPanel, NSPanel, NSPasteboard, NSSavePanel, NSPasteboardTypeString,
-    NSResponder, NSScreen, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField,
+    NSResponder, NSScreen, NSScrollView, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField,
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowOcclusionState, NSWindowStyleMask,
@@ -245,12 +245,21 @@ struct TileSpec {
     action: TileAction,
 }
 
-/// 상점 타일에 보여 줄 아이템 그림. 옷·신발은 색 견본을 보여 준다.
-fn item_icon(id: &str) -> TileIcon {
+/// 상점 타일에 보여 줄 아이템 그림. 옷은 지금 단계의 아롱이가 입은 모습을, 신발은 색 견본을 보여 준다.
+fn item_icon(id: &str, stage: arong_core::Stage) -> TileIcon {
     if let Some(acc) = crate::art::accessory_art(id) {
         return art_icon(Some(acc.art), 2.0);
     }
-    art_icon(crate::art::wear_color(id).map(crate::art::swatch), 2.0)
+    if let Some(thumb) = crate::sprites::outfit_thumb(id, stage) {
+        // 타일의 그림 칸(가로 84, 세로 40pt) 안에 들어가게 맞춘다.
+        let fit = (84.0 / thumb.w as f64).min(40.0 / thumb.h as f64);
+        return art_icon(Some(thumb), fit);
+    }
+    let color = crate::art::wear_color(id);
+    if arong_core::shop::item(id).is_some_and(|def| def.slot == Slot::Shoes) {
+        return art_icon(color.map(crate::art::boot_icon), 2.5);
+    }
+    art_icon(color.map(crate::art::swatch), 2.0)
 }
 
 /// 도트 그림을 타일 아이콘으로. `pt_per_px`는 그림 1px이 차지할 포인트.
@@ -330,6 +339,15 @@ pub struct Ivars {
     tiles_trash: RefCell<Vec<Retained<TilePanel>>>,
     tile_actions: RefCell<Vec<TileAction>>,
     tiles_open: Cell<bool>,
+    /// 방금 메뉴를 띄운 자리와, 사용자가 끌어다 놓은 자리(왼쪽 위 모서리).
+    /// 끌어다 놓은 뒤에는 하위 메뉴로 넘어가도 그 자리에 띄운다. 아롱이를 다시 우클릭하면 잊는다.
+    tiles_placed: Cell<CGPoint>,
+    /// 지금 메뉴의 스크롤 뷰(줄이 많을 때만)와 타일 수. 같은 목록을 다시 그릴 때 스크롤 위치를 잇는 데 쓴다.
+    tiles_scroll: RefCell<Option<Retained<NSScrollView>>>,
+    tiles_count: Cell<usize>,
+    tiles_anchor: Cell<Option<CGPoint>>,
+    /// 상점 타일에 마우스를 올려 미리 입어 보는 중인 아이템(부위, id). 화면에만 보이고 저장되지 않는다.
+    preview: RefCell<Option<(Slot, String)>>,
     bubble: RefCell<Option<Retained<NSWindow>>>,
     bubble_timer: RefCell<Option<Retained<NSTimer>>>,
     /// 얹는 장식 레이어. 아래부터 목 장식, 안경, 모자 순서로 겹친다.
@@ -549,11 +567,17 @@ define_class!(
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
             self.paint(true);
+            if let Some(c) = controller() {
+                c.tile_hover(Some(self.ivars().id));
+            }
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
             self.paint(false);
+            if let Some(c) = controller() {
+                c.tile_hover(None);
+            }
         }
 
         // mouseDown을 직접 받아야 mouseUp이 이 뷰로 온다(기본 구현은 상위로 넘겨 버린다).
@@ -615,6 +639,12 @@ define_class!(
                 c.close_tiles();
             }
         }
+
+        // 타일이 아닌 곳(제목, 타일 사이)을 누르고 끌면 메뉴를 옮긴다. 타일은 자기 클릭을 직접 받는다.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.performWindowDragWithEvent(event);
+        }
     }
 );
 
@@ -658,6 +688,12 @@ define_class!(
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _n: &NSNotification) {
             self.close_tiles();
+        }
+
+        // 메뉴를 끌어서 옮기는 동안 온다.
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _n: &NSNotification) {
+            self.tiles_dragged();
         }
     }
 
@@ -795,6 +831,22 @@ define_class!(
                         write(&rep, &format!("pet{i}.png"));
                     }
                 }
+                // 미리 입어 보기: 저장된 착용 상태는 그대로 두고 화면만 바뀌는지 본다.
+                for (name, preview) in [("preview_on.png", Some((Slot::Clothes, "coral_hoodie".to_string()))), ("preview_off.png", None)] {
+                    self.set_preview(preview);
+                    let rep = unsafe {
+                        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                            NSBitmapImageRep::alloc(), std::ptr::null_mut(), size, tall, 8, 4, true, false, NSDeviceRGBColorSpace, size * 4, 32,
+                        )
+                    };
+                    if let Some(rep) = rep
+                        && let Some(context) = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)
+                    {
+                        layer.renderInContext(&context.CGContext());
+                        write(&rep, name);
+                    }
+                    eprintln!("{name}: worn clothes in save = {:?}", iv.pet.borrow().wearing(Slot::Clothes));
+                }
                 self.rest();
             }
             // 1-2) 집에 들어가는 연출: 집과 아롱이를 한 장에 겹쳐 그려 단계별로 본다.
@@ -841,10 +893,11 @@ define_class!(
                 self.rest();
             }
             // 2) 타일 메뉴들.
-            let panels: [(&str, &dyn Fn()); 4] = [
+            let panels: [(&str, &dyn Fn()); 5] = [
                 ("tiles_main.png", &|| self.open_main_tiles()),
                 ("tiles_shop.png", &|| self.open_shop_tiles()),
                 ("tiles_shoes.png", &|| self.open_category_tiles(Slot::Shoes)),
+                ("tiles_clothes.png", &|| self.open_category_tiles(Slot::Clothes)),
                 ("tiles_training.png", &|| self.open_training_tiles()),
             ];
             for (name, open) in panels {
@@ -1178,7 +1231,12 @@ define_class!(
             let iv = self.ivars();
             let Some(latest) = crate::update::take_latest() else { return };
             if iv.update_on.get() == Some(true) && crate::update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
-                self.bubble(&format!("새 버전 {latest}이 나왔어요 (메뉴에서 업데이트 방법 보기)"));
+                // 아롱이가 정면을 보며 직접 알려 준다(하루 한 번 확인할 때마다).
+                if iv.walk.borrow().is_none() && iv.doorway.borrow().is_none() {
+                    self.stop_roam();
+                    self.perform(Act::Look);
+                }
+                self.bubble(&format!("멍! 새 버전 {latest}이 나왔다멍! 더보기 메뉴에서 업데이트 해달라 멍!"));
                 iv.new_version.replace(Some(latest));
             }
         }
@@ -1544,6 +1602,11 @@ impl Controller {
             tiles_trash: RefCell::new(Vec::new()),
             tile_actions: RefCell::new(Vec::new()),
             tiles_open: Cell::new(false),
+            tiles_placed: Cell::new(CGPoint::new(0.0, 0.0)),
+            tiles_scroll: RefCell::new(None),
+            tiles_count: Cell::new(0),
+            tiles_anchor: Cell::new(None),
+            preview: RefCell::new(None),
             bubble: RefCell::new(None),
             bubble_timer: RefCell::new(None),
             acc_layers: OnceCell::new(),
@@ -1863,15 +1926,14 @@ impl Controller {
 
     fn reload_atlas_if_needed(&self) {
         let iv = self.ivars();
-        let (stage, shoes) = {
-            let pet = iv.pet.borrow();
-            (pet.stage(&iv.tuning.borrow()), pet.wearing(Slot::Shoes).map(str::to_string))
-        };
-        if iv.atlas.borrow().as_ref().is_some_and(|a| a.stage == stage && a.shoes == shoes) {
+        let stage = iv.pet.borrow().stage(&iv.tuning.borrow());
+        let (shoes, clothes) = (self.shown(Slot::Shoes), self.shown(Slot::Clothes));
+        if iv.atlas.borrow().as_ref().is_some_and(|a| a.stage == stage && a.shoes == shoes && a.clothes == clothes) {
             return;
         }
         // 이전 그림은 여기서 해제된다(한 단계 분량만 유지).
-        iv.atlas.replace(Atlas::load(stage, shoes.as_deref()));
+        // 그림만 바꾸고 지금 동작·프레임은 건드리지 않으므로, 옷을 입고 벗어도 애니메이션이 이어진다.
+        iv.atlas.replace(Atlas::load(stage, shoes.as_deref(), clothes.as_deref()));
         // 성장 단계가 바뀌면 장식 위치도 달라진다.
         self.refresh_accessories();
         self.show_frame();
@@ -2323,7 +2385,23 @@ impl Controller {
         if self.ivars().tiles_open.get() {
             self.close_tiles();
         } else {
+            self.ivars().tiles_anchor.set(None);
             self.open_main_tiles();
+        }
+    }
+
+    /// 메뉴를 끌어서 옮겼으면 그 자리를 기억한다.
+    fn tiles_dragged(&self) {
+        let iv = self.ivars();
+        if !iv.tiles_open.get() {
+            return;
+        }
+        let Some(panel) = iv.tiles.borrow().clone() else { return };
+        let f = panel.frame();
+        let placed = iv.tiles_placed.get();
+        if (f.origin.x - placed.x).abs() > 1.0 || (f.origin.y - placed.y).abs() > 1.0 {
+            iv.tiles_anchor.set(Some(CGPoint::new(f.origin.x, f.origin.y + f.size.height)));
+            iv.tiles_placed.set(f.origin);
         }
     }
 
@@ -2332,11 +2410,41 @@ impl Controller {
         if !iv.tiles_open.replace(false) {
             return;
         }
+        self.set_preview(None);
         // 해제는 나중에 한다. 지금은 타일의 이벤트 처리 중일 수 있다.
         let panel = iv.tiles.borrow().clone();
         if let Some(panel) = panel {
             panel.orderOut(None);
         }
+    }
+
+    /// 타일에 마우스가 올라오거나 나갔다. 아직 안 가진 꾸미기 아이템이면 화면의 아롱이에게 미리 입혀 본다.
+    fn tile_hover(&self, id: Option<usize>) {
+        let iv = self.ivars();
+        let item = id.and_then(|id| match iv.tile_actions.borrow().get(id) {
+            Some(TileAction::Item(item)) => arong_core::shop::item(item),
+            _ => None,
+        });
+        let preview = item.filter(|def| !iv.pet.borrow().owned.contains(def.id)).map(|def| (def.slot, def.id.to_string()));
+        self.set_preview(preview);
+    }
+
+    fn set_preview(&self, preview: Option<(Slot, String)>) {
+        let iv = self.ivars();
+        if *iv.preview.borrow() == preview {
+            return;
+        }
+        iv.preview.replace(preview);
+        self.apply_outfit();
+    }
+
+    /// 화면에 보여 줄 착용 아이템: 미리 입어 보는 중이면 그것을, 아니면 실제로 입은 것을.
+    fn shown(&self, slot: Slot) -> Option<String> {
+        let iv = self.ivars();
+        if let Some((_, id)) = iv.preview.borrow().as_ref().filter(|(s, _)| *s == slot) {
+            return Some(id.clone());
+        }
+        iv.pet.borrow().wearing(slot).map(str::to_string)
     }
 
     fn open_main_tiles(&self) {
@@ -2378,18 +2486,18 @@ impl Controller {
     }
 
     fn open_shop_tiles(&self) {
-        let (coins, worn, house_level) = self.with_pet(|p, _| (p.coins, p.worn.clone(), p.house_level));
+        let (coins, worn, house_level, stage) = self.with_pet(|p, t| (p.coins, p.worn.clone(), p.house_level, p.stage(t)));
         let mut tiles = Vec::new();
         for slot in Slot::ALL {
-            // 옷은 옷 입은 그림 에셋이 생길 때까지 상점에 내놓지 않는다(가진 옷과 저장 데이터는 그대로 둔다).
-            if slot == Slot::Clothes {
+            // 옷은 옷 입은 그림이 있는 것만 판다. 하나도 없으면 칸을 내놓지 않는다(가진 옷과 저장 데이터는 그대로 둔다).
+            if slot == Slot::Clothes && !arong_core::ITEMS.iter().any(|d| d.slot == slot && crate::sprites::has_outfit(d.id)) {
                 continue;
             }
             let first = arong_core::ITEMS.iter().find(|d| d.slot == slot).map(|d| d.id);
             let icon = match slot {
-                Slot::Clothes => TileIcon::Symbol(&["tshirt.fill"]),
-                Slot::Shoes => TileIcon::Symbol(&["shoe.fill", "shoeprints.fill"]),
-                _ => item_icon(first.unwrap_or("")),
+                Slot::Clothes => TileIcon::Symbol(&["tshirt.fill", "hanger"]),
+                Slot::Shoes => item_icon(first.unwrap_or(""), stage),
+                _ => item_icon(first.unwrap_or(""), stage),
             };
             let caption = match worn.get(&slot).and_then(|id| arong_core::shop::item(id)) {
                 Some(def) => format!("{} · {}", slot.name(), def.name),
@@ -2424,9 +2532,20 @@ impl Controller {
     }
 
     fn open_category_tiles(&self, slot: Slot) {
-        let (coins, owned, worn) = self.with_pet(|p, _| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string)));
+        let (coins, owned, worn, stage) =
+            self.with_pet(|p, t| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string), p.stage(t)));
+        // 목록이 길면 스크롤해야 하므로, 돌아가기는 늘 보이는 맨 앞에 둔다.
         let mut tiles = Vec::new();
-        for def in arong_core::ITEMS.iter().filter(|d| d.slot == slot) {
+        tiles.push(TileSpec {
+            icon: TileIcon::Symbol(&["arrow.uturn.backward.circle.fill", "arrow.uturn.backward"]),
+            caption: "돌아가기".to_string(),
+            enabled: true,
+            active: false,
+            action: TileAction::Shop,
+        });
+        // 옷은 옷 입은 그림이 있는 것만 보여 준다.
+        let shown = |d: &&arong_core::shop::ItemDef| d.slot == slot && (slot != Slot::Clothes || crate::sprites::has_outfit(d.id));
+        for def in arong_core::ITEMS.iter().filter(shown) {
             let has = owned.contains(def.id);
             let wearing = worn.as_deref() == Some(def.id);
             let caption = if wearing {
@@ -2437,25 +2556,17 @@ impl Controller {
                 format!("{} · {}", def.name, def.price)
             };
             tiles.push(TileSpec {
-                icon: item_icon(def.id),
+                icon: item_icon(def.id, stage),
                 caption,
                 enabled: has || coins >= def.price,
                 active: wearing,
                 action: TileAction::Item(def.id),
             });
         }
-        tiles.push(TileSpec {
-            icon: TileIcon::Symbol(&["arrow.uturn.backward.circle.fill", "arrow.uturn.backward"]),
-            caption: "돌아가기".to_string(),
-            enabled: true,
-            active: false,
-            action: TileAction::Shop,
-        });
-        self.show_tiles(&format!("{} · 재화 {coins}", slot.name()), "누르면 구매, 가진 것은 누르면 입고 벗기", tiles);
+        self.show_tiles(&format!("{} · 재화 {coins}", slot.name()), "올려 두면 미리 입어 보기 · 누르면 구매, 입고 벗기", tiles);
     }
 
     fn show_tiles(&self, title: &str, subtitle: &str, tiles: Vec<TileSpec>) {
-        const COLS: usize = 3;
         const TILE_W: f64 = 92.0;
         const TILE_H: f64 = 76.0;
         const GAP: f64 = 8.0;
@@ -2466,17 +2577,42 @@ impl Controller {
         let Some(pet_panel) = iv.panel.get() else { return };
         self.stop_roam();
 
-        let rows = tiles.len().div_ceil(COLS);
-        let width = COLS as f64 * TILE_W + (COLS as f64 + 1.0) * GAP;
-        let height = HEADER + rows as f64 * TILE_H + (rows as f64 + 1.0) * GAP;
+        // 타일이 많아도(옷처럼) 창을 키우지 않는다. 이 줄 수를 넘으면 창 안에서 스크롤한다.
+        const MAX_ROWS: usize = 4;
+        let cols: usize = 3;
+        let count = tiles.len();
+        let rows = count.div_ceil(cols);
+        let shown_rows = rows.min(MAX_ROWS);
+        let width = cols as f64 * TILE_W + (cols as f64 + 1.0) * GAP;
+        let grid_height = rows as f64 * TILE_H + (rows as f64 + 1.0) * GAP;
+        let shown_height = shown_rows as f64 * TILE_H + (shown_rows as f64 + 1.0) * GAP;
+        let height = HEADER + shown_height;
 
         // 아롱이 바로 위(자리가 없으면 아래)에 띄운다.
         let pf = pet_panel.frame();
         let above = CGPoint::new(pf.origin.x + pf.size.width / 2.0 - width / 2.0, pf.origin.y + pf.size.height + 6.0);
-        let mut origin = clamp_rect(mtm, above, width, height);
-        if origin.y < above.y - 1.0 {
-            origin = clamp_rect(mtm, CGPoint::new(above.x, pf.origin.y - height - 6.0), width, height);
-        }
+        // 위, 아래, 오른쪽, 왼쪽 순서로 아롱이를 가리지 않는 자리를 찾는다(미리 입어 보기가 보여야 한다).
+        let middle = pf.origin.y + pf.size.height / 2.0 - height / 2.0;
+        let spots = [
+            above,
+            CGPoint::new(above.x, pf.origin.y - height - 6.0),
+            CGPoint::new(pf.origin.x + pf.size.width + 6.0, middle),
+            CGPoint::new(pf.origin.x - width - 6.0, middle),
+        ];
+        let covers = |o: CGPoint| {
+            o.x < pf.origin.x + pf.size.width && o.x + width > pf.origin.x && o.y < pf.origin.y + pf.size.height && o.y + height > pf.origin.y
+        };
+        let origin = spots
+            .into_iter()
+            .map(|spot| clamp_rect(mtm, spot, width, height))
+            .find(|o| !covers(*o))
+            .unwrap_or_else(|| clamp_rect(mtm, above, width, height));
+        // 사용자가 끌어다 놓은 자리가 있으면 그 자리(왼쪽 위 모서리 기준)에 띄운다.
+        let origin = match iv.tiles_anchor.get() {
+            Some(anchor) => clamp_rect(mtm, CGPoint::new(anchor.x, anchor.y - height), width, height),
+            None => origin,
+        };
+        iv.tiles_placed.set(origin);
         let rect = CGRect::new(origin, CGSize::new(width, height));
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), rect.size);
 
@@ -2524,13 +2660,15 @@ impl Controller {
         stats.setTextColor(Some(&NSColor::secondaryLabelColor()));
         effect.addSubview(&stats);
 
+        // 타일을 담는 판. 줄이 많으면 이 판을 스크롤 뷰에 넣는다.
+        let grid = NSView::initWithFrame(mtm.alloc(), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, grid_height)));
         let mut actions = Vec::with_capacity(tiles.len());
         for (id, spec) in tiles.into_iter().enumerate() {
-            let (col, row) = (id % COLS, id / COLS);
+            let (col, row) = (id % cols, id / cols);
             let frame = CGRect::new(
                 CGPoint::new(
                     GAP + col as f64 * (TILE_W + GAP),
-                    height - HEADER - GAP - (row as f64 + 1.0) * TILE_H - row as f64 * GAP,
+                    grid_height - GAP - (row as f64 + 1.0) * TILE_H - row as f64 * GAP,
                 ),
                 CGSize::new(TILE_W, TILE_H),
             );
@@ -2566,7 +2704,7 @@ impl Controller {
                 TileIcon::Image(image) => {
                     icon.setImage(image.as_deref());
                     if !spec.enabled {
-                        icon.setAlphaValue(0.4);
+                        icon.setAlphaValue(0.6);
                     }
                 }
             }
@@ -2576,10 +2714,28 @@ impl Controller {
             }
             tile.addSubview(&icon);
             tile.addSubview(&caption);
-            effect.addSubview(&tile);
+            grid.addSubview(&tile);
             actions.push(spec.action);
         }
 
+        // 같은 목록을 다시 그릴 때(구매·착용 직후)는 보던 스크롤 위치를 유지한다.
+        let kept = iv.tiles_scroll.borrow().as_ref().filter(|_| iv.tiles_count.get() == count).map(|old| old.contentView().bounds().origin.y);
+        iv.tiles_count.set(count);
+        if rows > shown_rows {
+            let scroll = NSScrollView::initWithFrame(mtm.alloc(), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, shown_height)));
+            scroll.setDrawsBackground(false);
+            scroll.setHasVerticalScroller(true);
+            scroll.setAutohidesScrollers(true);
+            scroll.setDocumentView(Some(&grid));
+            // 처음에는 맨 위(첫 줄)를 보여 준다.
+            let y = kept.unwrap_or(grid_height - shown_height).clamp(0.0, grid_height - shown_height);
+            grid.scrollPoint(CGPoint::new(0.0, y));
+            effect.addSubview(&scroll);
+            iv.tiles_scroll.replace(Some(scroll));
+        } else {
+            effect.addSubview(&grid);
+            iv.tiles_scroll.replace(None);
+        }
         panel.setContentView(Some(&effect));
         // 이전 패널은 지금 그 패널의 타일 이벤트 처리 중일 수 있어 바로 해제하지 않는다.
         if let Some(old) = iv.tiles.replace(Some(panel.clone())) {
@@ -3101,10 +3257,8 @@ impl Controller {
     fn refresh_accessories(&self) {
         let iv = self.ivars();
         let Some(layers) = iv.acc_layers.get() else { return };
-        let (stage, worn) = {
-            let pet = iv.pet.borrow();
-            (crate::art::stage_index(pet.stage(&iv.tuning.borrow())), ACC_SLOTS.map(|slot| pet.wearing(slot).map(str::to_string)))
-        };
+        let stage = crate::art::stage_index(iv.pet.borrow().stage(&iv.tuning.borrow()));
+        let worn = ACC_SLOTS.map(|slot| self.shown(slot));
         let mut shapes = [None; 3];
         CATransaction::begin();
         CATransaction::setDisableActions(true);

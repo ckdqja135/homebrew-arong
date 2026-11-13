@@ -54,7 +54,7 @@ pub const MOTIONS: [Motion; 9] = [
 ];
 
 macro_rules! sheets {
-    ($stage:literal) => {
+    ($stage:expr) => {
         [
             include_bytes!(concat!("../../../assets/", $stage, "_walk.png")).as_slice(),
             include_bytes!(concat!("../../../assets/", $stage, "_paw_left.png")).as_slice(),
@@ -71,6 +71,128 @@ macro_rules! sheets {
 
 /// `MOTIONS` 순서의 시트. 단계 순서는 아기, 성장기, 성견.
 static SHEETS: [[&[u8]; 9]; 3] = [sheets!("baby"), sheets!("growing"), sheets!("adult")];
+
+macro_rules! outfit {
+    ($id:literal, $index:literal, $stage:literal) => {
+        ($id, $index, sheets!(concat!("outfits/", $id, "/", $stage)))
+    };
+}
+
+/// 옷 입은 그림: (옷 id, 단계 번호, `MOTIONS` 순서의 시트). 옷만 있는 레이어가 아니라 옷을 입은 아롱이 전체 그림이라,
+/// 입으면 몸 그림을 통째로 바꿔 쓴다. 기본 그림과 프레임 수·위치·윤곽이 같다(scripts/build_outfit.py가 확인한다).
+/// 여기 없는 단계는 기본 그림을 그대로 쓴다.
+static OUTFITS: [(&str, usize, [&[u8]; 9]); 27] = [
+    outfit!("blue_knit", 0, "baby"),
+    outfit!("blue_knit", 1, "growing"),
+    outfit!("blue_knit", 2, "adult"),
+    outfit!("coral_hoodie", 0, "baby"),
+    outfit!("coral_hoodie", 1, "growing"),
+    outfit!("coral_hoodie", 2, "adult"),
+    outfit!("teal_hanbok", 0, "baby"),
+    outfit!("teal_hanbok", 1, "growing"),
+    outfit!("teal_hanbok", 2, "adult"),
+    outfit!("pink_bunny", 0, "baby"),
+    outfit!("pink_bunny", 1, "growing"),
+    outfit!("pink_bunny", 2, "adult"),
+    outfit!("yellow_bear", 0, "baby"),
+    outfit!("yellow_bear", 1, "growing"),
+    outfit!("yellow_bear", 2, "adult"),
+    outfit!("green_dino", 0, "baby"),
+    outfit!("green_dino", 1, "growing"),
+    outfit!("green_dino", 2, "adult"),
+    outfit!("camel_trench", 0, "baby"),
+    outfit!("camel_trench", 1, "growing"),
+    outfit!("camel_trench", 2, "adult"),
+    outfit!("lavender_cape", 0, "baby"),
+    outfit!("lavender_cape", 1, "growing"),
+    outfit!("lavender_cape", 2, "adult"),
+    outfit!("sky_puffer", 0, "baby"),
+    outfit!("sky_puffer", 1, "growing"),
+    outfit!("sky_puffer", 2, "adult"),
+];
+
+/// 색만 다른 옷: (옷 id, 그림을 빌려 쓰는 옷 id, 옷 색으로 볼 색상 폭(도), 옷 색으로 볼 가장 밝은 밝기).
+/// 그림을 따로 두지 않고, 읽을 때 옷 색만 `art::wear_color`로 바꾼다.
+static OUTFIT_COLORS: [(&str, &str, f64, f64); 14] = [
+    ("red_knit", "blue_knit", 30.0, 1.0),
+    ("yellow_knit", "blue_knit", 30.0, 1.0),
+    ("pink_knit", "blue_knit", 30.0, 1.0),
+    ("green_knit", "blue_knit", 30.0, 1.0),
+    ("sky_hoodie", "coral_hoodie", 30.0, 1.0),
+    ("yellow_hoodie", "coral_hoodie", 30.0, 1.0),
+    ("mint_hoodie", "coral_hoodie", 30.0, 1.0),
+    ("purple_hoodie", "coral_hoodie", 30.0, 1.0),
+    // 한복은 저고리의 청록색만 바꾼다. 색동 소매의 파랑·하늘색 줄은 건드리지 않도록 색상 폭과 밝기를 좁게 둔다.
+    ("pink_hanbok", "teal_hanbok", 14.0, 0.7),
+    ("yellow_hanbok", "teal_hanbok", 14.0, 0.7),
+    ("yellow_dino", "green_dino", 30.0, 1.0),
+    ("white_dino", "green_dino", 30.0, 1.0),
+    ("pink_dino", "green_dino", 30.0, 1.0),
+    ("red_dino", "green_dino", 30.0, 1.0),
+];
+
+/// (그림을 가진 옷 id, 바꿔 칠하는 방법).
+fn outfit_source(id: &str) -> (&str, Option<art::Tint>) {
+    match OUTFIT_COLORS.iter().find(|(variant, ..)| *variant == id) {
+        Some(&(_, source, spread, brightest)) => {
+            let tint = art::wear_color(source).zip(art::wear_color(id)).map(|(from, to)| art::Tint { from, to, spread, brightest });
+            (source, tint)
+        }
+        None => (id, None),
+    }
+}
+
+/// 이 옷의 그림이 하나라도 있는지. 그림이 없는 옷은 상점에 내놓지 않는다.
+pub fn has_outfit(id: &str) -> bool {
+    let (source, _) = outfit_source(id);
+    OUTFITS.iter().any(|(outfit, ..)| *outfit == source)
+}
+
+/// 이 단계·동작의 옷 입은 시트와, 바꿔 칠할 색(색만 다른 옷일 때).
+fn outfit_sheet(id: &str, stage: Stage, motion: Motion) -> Option<(&'static [u8], Option<art::Tint>)> {
+    let stage = art::stage_index(stage);
+    let (source, tint) = outfit_source(id);
+    OUTFITS.iter().find(|(outfit, s, _)| *outfit == source && *s == stage).map(|(.., sheets)| (sheets[motion as usize], tint))
+}
+
+/// 상점에 보여 줄 옷 그림: 이 단계의 서 있는 프레임에서 옷이 있는 부분만 잘라 낸다(색만 다른 옷은 색을 바꿔서).
+pub fn outfit_thumb(id: &str, stage: Stage) -> Option<Art> {
+    const PAD: usize = 5;
+    let (bytes, tint) = outfit_sheet(id, stage, Motion::PawLeft)?;
+    let decode = |bytes: &[u8]| -> Option<Art> {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
+        Art::from_rep(&rep)
+    };
+    let bare = decode(SHEETS[art::stage_index(stage)][Motion::PawLeft as usize])?;
+    let mut dressed = decode(bytes)?;
+    if dressed.w != bare.w || dressed.h != bare.h {
+        return None;
+    }
+    if let Some(tint) = tint {
+        art::tint_garment(&mut dressed, &bare, &tint);
+    }
+    // 서 있는 프레임(0번 칸)에서 옷 없는 그림과 달라진 영역.
+    let (mut x0, mut y0, mut x1, mut y1) = (CELL, CELL, 0, 0);
+    for y in 0..CELL {
+        for x in 0..CELL {
+            if dressed.px[y * dressed.w + x] != bare.px[y * bare.w + x] {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    if x0 > x1 {
+        return None;
+    }
+    let (x0, y0) = (x0.saturating_sub(PAD), y0.saturating_sub(PAD));
+    let (x1, y1) = ((x1 + PAD).min(CELL - 1), (y1 + PAD).min(CELL - 1));
+    let mut thumb = Art::new(x1 - x0 + 1, y1 - y0 + 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            thumb.px[(y - y0) * thumb.w + (x - x0)] = dressed.px[y * dressed.w + x];
+        }
+    }
+    Some(thumb)
+}
 
 /// 시트마다 "서 있는 자세"가 몇 번째 프레임인지. 에셋마다 시작 자세가 달라서(서서 시작하는 것과
 /// 앉아서 시작하는 것이 섞여 있다) 여기서 맞춘다. 앱에서는 항상 서 있는 자세가 0번이 되도록 돌려 쓴다.
@@ -109,13 +231,23 @@ pub struct Atlas {
     pub stage: Stage,
     /// 이 그림에 칠해 넣은 신발 아이템 id.
     pub shoes: Option<String>,
+    /// 입고 있는 옷 아이템 id(그림이 없는 동작은 기본 그림이다).
+    pub clothes: Option<String>,
     motions: Vec<Vec<Frame>>,
     // 부분 이미지들이 참조하는 원본을 살려 둔다.
     _sources: Vec<Retained<CGImage>>,
 }
 
 /// 시트 한 장을 디코딩하고, 신발을 칠한 뒤, 그림이 있는 영역만 잘라 프레임으로 만든다.
-fn build(bytes: &[u8], stage: Stage, motion: Motion, shoes: Option<&str>) -> Option<(Vec<Frame>, Retained<CGImage>)> {
+/// `dressed`는 같은 동작의 옷 입은 시트다. 있으면 그리는 그림만 그것으로 바꾸고, 머리 기준점은 기본 그림에서 구한다
+/// (옷 색에 따라 기준점이 흔들리지 않게).
+fn build(
+    bytes: &[u8],
+    dressed: Option<(&[u8], Option<art::Tint>)>,
+    stage: Stage,
+    motion: Motion,
+    shoes: Option<&str>,
+) -> Option<(Vec<Frame>, Retained<CGImage>)> {
     let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
     let mut source = rep.CGImage()?;
     let (width, height) = (CGImage::width(Some(&source)), CGImage::height(Some(&source)));
@@ -127,6 +259,22 @@ fn build(bytes: &[u8], stage: Stage, motion: Motion, shoes: Option<&str>) -> Opt
     // 픽셀 사본은 기준점·경계 계산과 신발 칠하기에만 쓰고 바로 버린다.
     let mut pixels = Art::from_rep(&rep)?;
     let anchors: Vec<(i32, i32)> = (0..count).map(|col| art::head_anchor(&pixels, col, 0, CELL, side)).collect();
+    // 옷 입은 시트는 기본 시트와 크기가 같을 때만 쓴다. 아니면 기본 그림으로 둔다.
+    let tint = dressed.and_then(|(_, tint)| tint);
+    let dressed = dressed
+        .and_then(|(bytes, _)| NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes)))
+        .and_then(|rep| Some((Art::from_rep(&rep)?, rep.CGImage()?)))
+        .filter(|(art, _)| art.w == width && art.h == height);
+    if let Some((mut art, image)) = dressed {
+        source = match tint {
+            Some(tint) => {
+                art::tint_garment(&mut art, &pixels, &tint);
+                art.cg_image()?
+            }
+            None => image,
+        };
+        pixels = art;
+    }
     if let Some(color) = shoes.and_then(art::wear_color) {
         art::paint_shoes(&mut pixels, CELL, color);
         source = pixels.cg_image()?;
@@ -162,16 +310,18 @@ fn build(bytes: &[u8], stage: Stage, motion: Motion, shoes: Option<&str>) -> Opt
 
 impl Atlas {
     /// `shoes`가 있으면 디코딩한 그림에 한 번 칠해 넣는다(프레임마다 다시 칠하지 않는다).
-    pub fn load(stage: Stage, shoes: Option<&str>) -> Option<Atlas> {
+    /// `clothes`가 있고 그 옷의 그림이 있는 동작은 옷 입은 그림으로 바꿔 쓴다.
+    pub fn load(stage: Stage, shoes: Option<&str>, clothes: Option<&str>) -> Option<Atlas> {
         let sheets = &SHEETS[art::stage_index(stage)];
         let mut motions = Vec::with_capacity(MOTIONS.len());
         let mut sources = Vec::with_capacity(MOTIONS.len());
         for motion in MOTIONS {
-            let (frames, source) = build(sheets[motion as usize], stage, motion, shoes)?;
+            let dressed = clothes.and_then(|id| outfit_sheet(id, stage, motion));
+            let (frames, source) = build(sheets[motion as usize], dressed, stage, motion, shoes)?;
             motions.push(frames);
             sources.push(source);
         }
-        Some(Atlas { stage, shoes: shoes.map(str::to_string), motions, _sources: sources })
+        Some(Atlas { stage, shoes: shoes.map(str::to_string), clothes: clothes.map(str::to_string), motions, _sources: sources })
     }
 
     /// 이 동작의 프레임 수.
@@ -195,9 +345,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn outfit_frames_sit_exactly_where_the_bare_frames_do() {
+        for (id, stage, _) in OUTFITS {
+            let stage = [Stage::Baby, Stage::Growing, Stage::Adult][stage];
+            let bare = Atlas::load(stage, None, None).expect("bare atlas");
+            let worn = Atlas::load(stage, None, Some(id)).expect("dressed atlas");
+            for motion in MOTIONS {
+                assert_eq!(bare.len(motion), worn.len(motion), "{id} {motion:?}");
+                for index in 0..bare.len(motion) {
+                    let (a, b) = (bare.frame(motion, index), worn.frame(motion, index));
+                    // 머리 기준점은 그대로이고, 그림 자리는 가장자리 1~2px 안에서만 다르다.
+                    assert_eq!(a.head, b.head, "{id} {motion:?} {index}");
+                    let (ra, rb) = (a.rect, b.rect);
+                    let near = |x: f64, y: f64| (x - y).abs() <= 3.0;
+                    assert!(near(ra.0, rb.0) && near(ra.1, rb.1) && near(ra.2, rb.2) && near(ra.3, rb.3), "{id} {motion:?} {index} {ra:?} {rb:?}");
+                    assert!(near(ra.1 + ra.3, rb.1 + rb.3));
+                }
+            }
+        }
+        // 상점 그림은 옷이 있는 부분만 담는다.
+        for stage in [Stage::Baby, Stage::Growing, Stage::Adult] {
+            let thumb = outfit_thumb("pink_hanbok", stage).expect("thumb");
+            assert!(thumb.w > 20 && thumb.w < CELL && thumb.h > 15 && thumb.h < CELL, "{stage:?} {}x{}", thumb.w, thumb.h);
+        }
+        assert!(outfit_thumb("red_wear", Stage::Adult).is_none());
+        assert!(has_outfit("blue_knit") && has_outfit("pink_knit") && has_outfit("mint_hoodie") && !has_outfit("red_wear"));
+        // 색만 다른 옷도 같은 자리에 놓인다.
+        let (blue, pink) = (Atlas::load(Stage::Adult, None, Some("blue_knit")).unwrap(), Atlas::load(Stage::Adult, None, Some("pink_knit")).unwrap());
+        for motion in MOTIONS {
+            for index in 0..blue.len(motion) {
+                assert_eq!(blue.frame(motion, index).rect, pink.frame(motion, index).rect);
+            }
+        }
+    }
+
+    #[test]
     fn all_stages_decode_with_tight_frames_on_the_ground() {
         for stage in [Stage::Baby, Stage::Growing, Stage::Adult] {
-            let atlas = Atlas::load(stage, Some("yellow_boots")).expect("atlas should decode");
+            let atlas = Atlas::load(stage, Some("yellow_boots"), None).expect("atlas should decode");
             assert_eq!(atlas.len(Motion::Walk), 12);
             for motion in MOTIONS {
                 assert!((6..=12).contains(&atlas.len(motion)), "{stage:?} {motion:?}");

@@ -238,6 +238,11 @@ const LENS: Rgba = [176, 214, 240, 255];
 const NAVY: Rgba = [36, 44, 70, 255];
 const PINK: Rgba = [244, 110, 160, 255];
 const PINKL: Rgba = [255, 180, 206, 255];
+const PD: Rgba = [104, 68, 170, 255];
+const GR: Rgba = [84, 170, 96, 255];
+const GRL: Rgba = [146, 210, 124, 255];
+const O: Rgba = [244, 150, 50, 255];
+const OL: Rgba = [255, 200, 120, 255];
 
 pub fn accessory_art(id: &str) -> Option<Accessory> {
     // 모자는 머리 꼭대기보다 `sink`px 눌러 씌운다.
@@ -374,6 +379,227 @@ pub fn accessory_art(id: &str) -> Option<Accessory> {
             ],
             &[('r', R), ('w', W)],
         ),
+        "headbow" => hat(
+            &[
+                "pp........pp",
+                "pPpp....ppPp",
+                "pppppqqppppp",
+                "pPpppqqppPpp",
+                "ppp......ppp",
+            ],
+            &[('p', PINK), ('P', PINKL), ('q', R)],
+            3,
+        ),
+        "flower_crown" => hat(
+            &[
+                "..pp....ww....pp..",
+                ".pypp..wyww..pypp.",
+                "gppppggwwwwggppppg",
+                ".gGggGggGggGggGgg.",
+            ],
+            &[('p', PINK), ('y', Y), ('w', W), ('g', GR), ('G', GRL)],
+            3,
+        ),
+        "cap" => hat(
+            &[
+                "........cccccc....",
+                "......ccCccccccc..",
+                ".....ccCccccccccc.",
+                ".....cccccwwcccccc",
+                ".....ccccccccccccc",
+                "dddddddddddddddddd",
+            ],
+            &[('c', C), ('C', W), ('d', CD), ('w', W)],
+            4,
+        ),
+        "chef" => hat(
+            &[
+                "..www.wwww.www..",
+                ".wwwwwwwwwwwwww.",
+                "wwwwwwwwwwwwwwww",
+                "wwwwwwwwwwwwwwww",
+                ".wwgwwwgwwwgwww.",
+                "..wwwwwwwwwwww..",
+                "..wgwgwgwgwgww..",
+                "..wwwwwwwwwwww..",
+                "..gggggggggggg..",
+            ],
+            &[('w', W), ('g', G)],
+            3,
+        ),
+        "santa" => hat(
+            &[
+                "...........ww...",
+                "..........wwww..",
+                ".........rrww...",
+                ".......rrrrr....",
+                ".....rrrrrrrr...",
+                "....rrRrrrrrrr..",
+                "...rrRrrrrrrrr..",
+                "..rrrrrrrrrrrr..",
+                "wwwwwwwwwwwwwwww",
+                "wgwwgwwgwwgwwgww",
+            ],
+            &[('w', W), ('g', G), ('r', R), ('R', RL)],
+            5,
+        ),
+        "chick" => hat(
+            &[
+                "...yyyy...",
+                "..yyyyyy..",
+                "ooynyyyy..",
+                "..yyyyyyy.",
+                ".yyyYYyyyy",
+                ".yyyyyyyy.",
+                "..yyyyyy..",
+            ],
+            &[('y', Y), ('Y', YD), ('o', O), ('n', NAVY)],
+            1,
+        ),
+        "wizard" => hat(
+            &[
+                ".........pp.......",
+                "........ppp.......",
+                "........pppp......",
+                ".......ppypp......",
+                ".......ppppp......",
+                "......pppppyp.....",
+                "......ppppppp.....",
+                ".....pyppppppp....",
+                ".....yyyyyyyyy....",
+                "...ppppppppppppp..",
+                "dddddddddddddddddd",
+            ],
+            &[('p', P), ('d', PD), ('y', Y)],
+            4,
+        ),
+        "movie_glasses" => glasses(
+            &[
+                "wwwwwwwwwww",
+                "wrrrrwccccw",
+                "wrrrrwccccw",
+                "wwwww.wwwww",
+            ],
+            &[('w', W), ('r', R), ('c', C)],
+        ),
+        "goggles" => glasses(
+            &[
+                ".nnnnnnnnn.",
+                "nooOoooooon",
+                "noooooooOon",
+                ".nnnnnnnnn.",
+            ],
+            &[('n', NAVY), ('o', O), ('O', OL)],
+        ),
+        "star_glasses" => glasses(
+            &[
+                "..y.....y..",
+                ".yyy...yyy.",
+                "yyYyyyyyYyy",
+                ".yyy...yyy.",
+                ".y.y...y.y.",
+            ],
+            &[('y', Y), ('Y', W)],
+        ),
+        "bell" => neck(
+            &[
+                "rrrrrrrrrr",
+                "rrrryyrrrr",
+                "...yYyy...",
+                "...yyyy...",
+                "....nn....",
+            ],
+            &[('r', R), ('y', Y), ('Y', W), ('n', YD)],
+        ),
+        "bandana" => neck(
+            &[
+                "rrrrrrrrrrrr",
+                ".rrwrrrrwrr.",
+                "..rrrrwrrr..",
+                "...rrrrrr...",
+                "....rwrr....",
+                ".....rr.....",
+            ],
+            &[('r', R), ('w', W)],
+        ),
+        "necktie" => neck(
+            &[
+                "wwwwwwww",
+                "..wnnw..",
+                "...nn...",
+                "..nnnn..",
+                "..ncnn..",
+                "..nnnn..",
+                "...nn...",
+            ],
+            &[('w', W), ('n', CD), ('c', C)],
+        ),
+        "pearls" => neck(
+            &[
+                "wgwgwgwgwgw",
+                "....wpw....",
+                ".....w.....",
+            ],
+            &[('w', W), ('g', G), ('p', PINKL)],
+        ),
+        "medal" => neck(
+            &[
+                "c.......c",
+                ".c.....c.",
+                "..c...c..",
+                "...yyy...",
+                "..yyYyy..",
+                "..yydyy..",
+                "...yyy...",
+            ],
+            &[('c', C), ('y', Y), ('Y', W), ('d', YD)],
+        ),
+        "lei" => neck(
+            &[
+                ".pp.ww.pp.ww.pp.",
+                "pyypwyywpyypwyyw",
+                ".pp.ww.pp.ww.pp.",
+            ],
+            &[('p', PINK), ('w', W), ('y', Y)],
+        ),
+        "bib" => neck(
+            &[
+                ".pp......pp.",
+                "pwwp....pwwp",
+                "pwwwppppwwwp",
+                "pwwwwwwwwwwp",
+                "pwwwrwrwwwwp",
+                "pwwwrrrwwwwp",
+                ".pwwwrwwwwp.",
+                "..pwwwwwwp..",
+                "...pppppp...",
+            ],
+            &[('p', PINK), ('w', W), ('r', R)],
+        ),
+        "sailor" => neck(
+            &[
+                "wwwwwwwwwwwwww",
+                "wnnnnwwwwnnnnw",
+                "wnnnnnwwnnnnnw",
+                ".wnnnnrrnnnnw.",
+                "..wwwwrrwwww..",
+                "......rr......",
+                ".....rrrr.....",
+            ],
+            &[('w', W), ('n', CD), ('r', R)],
+        ),
+        "capelet" => neck(
+            &[
+                "....rryyrr....",
+                "..rrrryyrrrr..",
+                ".rrRrrrrrrrrr.",
+                "rrRrrrrrrrrrrr",
+                "rrrrrrrrrrrrrr",
+                "wwnwwwnwwwnwww",
+                "wwwwnwwwnwwwww",
+            ],
+            &[('r', R), ('R', RL), ('y', Y), ('w', W), ('n', NAVY)],
+        ),
         _ => None,
     }
 }
@@ -406,6 +632,47 @@ fn hsv(c: Rgba) -> (f64, f64, f64) {
     (h, if max == 0.0 { 0.0 } else { d / max }, max)
 }
 
+/// 색만 다른 옷을 만들 때 바꿔 칠하는 방법.
+#[derive(Clone, Copy)]
+pub struct Tint {
+    /// 그림에 그려진 원래 옷 색과 새 색.
+    pub from: Rgba,
+    pub to: Rgba,
+    /// 원래 옷 색에서 색상이 몇 도까지 벗어난 픽셀을 옷 색으로 볼지. 여러 색이 섞인 옷은 좁게 준다.
+    pub spread: f64,
+    /// 이보다 밝은 픽셀은 옷 색으로 보지 않는다(같은 계열의 밝은 줄무늬를 남길 때 쓴다). 1.0이면 제한 없음.
+    pub brightest: f64,
+}
+
+fn from_hsv(h: f64, s: f64, v: f64) -> Rgba {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match (h.rem_euclid(360.0) / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let f = |k: f64| ((k + v - c) * 255.0).round().clamp(0.0, 255.0) as u8;
+    [f(r), f(g), f(b), 255]
+}
+
+/// 색만 다른 옷: 옷 그림에서 원래 옷 색(`from`) 계열의 픽셀만 `color` 계열로 바꾼다(명암은 유지한다).
+/// 옷 픽셀은 "옷 없는 그림과 달라진, 원래 옷 색과 색상이 가까운 픽셀"로 찾으므로, 털·흰 줄무늬·끈·효과 픽셀은 건드리지 않는다.
+pub fn tint_garment(dressed: &mut Art, bare: &Art, tint: &Tint) {
+    let (base_h, base_s, base_v) = hsv(tint.from);
+    let (to_h, to_s, to_v) = hsv(tint.to);
+    for (pixel, under) in dressed.px.iter_mut().zip(&bare.px) {
+        let (h, s, v) = hsv(*pixel);
+        let apart = (h - base_h).rem_euclid(360.0);
+        if pixel[3] > 128 && pixel != under && s > 0.3 && apart.min(360.0 - apart) <= tint.spread && v <= tint.brightest {
+            *pixel = from_hsv(to_h, (s * to_s / base_s).min(1.0), (v * to_v / base_v).min(1.0));
+        }
+    }
+}
+
 fn shade(c: Rgba, k: f64) -> Rgba {
     let f = |v: u8| (v as f64 * k).round().clamp(0.0, 255.0) as u8;
     [f(c[0]), f(c[1]), f(c[2]), 255]
@@ -418,7 +685,33 @@ pub fn wear_color(id: &str) -> Option<Rgba> {
         "blue_wear" => [70, 124, 214, 255],
         "green_wear" => [72, 168, 96, 255],
         "brown_wear" => [196, 112, 66, 255],
+        "blue_knit" => [52, 132, 222, 255],
+        "red_knit" => [222, 62, 62, 255],
+        "yellow_knit" => [246, 196, 50, 255],
+        "pink_knit" => [246, 124, 172, 255],
+        "green_knit" => [66, 172, 98, 255],
+        "coral_hoodie" => [240, 96, 72, 255],
+        "sky_hoodie" => [96, 180, 236, 255],
+        "yellow_hoodie" => [246, 196, 50, 255],
+        "mint_hoodie" => [84, 204, 168, 255],
+        "purple_hoodie" => [150, 104, 220, 255],
+        "teal_hanbok" => [28, 160, 164, 255],
+        "pink_hanbok" => [240, 118, 168, 255],
+        "yellow_hanbok" => [244, 194, 54, 255],
+        "pink_bunny" => [240, 110, 150, 255],
+        "yellow_bear" => [246, 190, 40, 255],
+        "green_dino" => [72, 172, 60, 255],
+        "yellow_dino" => [246, 200, 56, 255],
+        "white_dino" => [236, 236, 230, 255],
+        "pink_dino" => [246, 128, 176, 255],
+        "red_dino" => [222, 62, 62, 255],
+        "camel_trench" => [196, 152, 92, 255],
+        "lavender_cape" => [176, 138, 220, 255],
+        "sky_puffer" => [108, 204, 232, 255],
         "yellow_boots" => [246, 200, 52, 255],
+        "blue_boots" => [70, 124, 214, 255],
+        "pink_boots" => [244, 120, 168, 255],
+        "purple_boots" => [142, 98, 214, 255],
         _ => return None,
     })
 }
@@ -456,8 +749,16 @@ fn is_body(c: Rgba) -> bool {
     c[3] > 128 && (v < 0.3 || s < 0.45)
 }
 
-/// 신발: 프레임마다 발끝(바닥에 닿은 좁은 기둥)의 아래 몇 줄을 장화 색으로 칠한다.
-/// 그림을 따로 그리지 않고 원본 다리 모양을 따라가므로 걷는 동작과 어긋나지 않는다.
+/// 장화의 높이(px)와 밑창 색.
+const BOOT_H: i32 = 10;
+/// 바닥에서 이만큼(px) 떠 있는 발까지 장화를 신긴다.
+const FOOT_LIFT: i32 = 8;
+const SOLE: Rgba = [58, 46, 48, 255];
+
+/// 신발: 프레임마다 바닥에 닿은 발(좁은 기둥)에 장화를 신긴다.
+/// 그림을 따로 얹지 않고 원본 다리 모양을 따라가므로 걷는 동작과 어긋나지 않는다.
+/// 발 모양 그대로 칠하면 "발을 색칠한" 것처럼 보이므로, 장화답게 목 높이를 일자로 맞추고
+/// 접힌 목단·광택·평평한 밑창을 넣는다. 공중에 든 발은 찾지 못해 신기지 않는다.
 pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
     for row in 0..atlas.h / cell {
         for col in 0..atlas.w / cell {
@@ -467,46 +768,120 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
                 .collect();
             let Some(ground) = lowest.iter().flatten().copied().max() else { continue };
             // 발은 바닥에 닿아 있고 발끝이 밝은색(크림·회색)이다. 검은 털 덩어리(배·꼬리)는 제외한다.
-            let foot: Vec<bool> = (0..cell)
+            // 걷느라 살짝 든 발도 포함하도록 바닥에서 몇 px 떠 있는 것까지 본다.
+            let mut foot: Vec<bool> = (0..cell)
                 .map(|x| {
                     lowest[x].is_some_and(|y| {
-                        y >= ground - 3 && (y - 3..=y).any(|yy| hsv(atlas.get(ox + x as i32, oy + yy)).2 > 0.42)
+                        y >= ground - FOOT_LIFT && (y - 3..=y).any(|yy| hsv(atlas.get(ox + x as i32, oy + yy)).2 > 0.36)
                     })
                 })
                 .collect();
-            let touching = |x: usize| foot[x];
+            // 발가락 사이의 어두운 틈(한두 칸)으로 발 하나가 둘로 갈라지지 않게 메운다.
+            for x in 1..cell.saturating_sub(2) {
+                if !foot[x] && foot[x - 1] && (foot[x + 1] || foot[x + 2]) && lowest[x].is_some_and(|y| y >= ground - FOOT_LIFT) {
+                    foot[x] = true;
+                }
+            }
+            // 발 구간을 모은다. 나란히 붙은 두 발(아기처럼 다리가 짧을 때)은 반으로 나눈다.
+            let mut runs: Vec<(i32, i32)> = Vec::new();
             let mut x = 0;
             while x < cell {
-                if !touching(x) {
+                if !foot[x] {
                     x += 1;
                     continue;
                 }
                 let start = x;
-                while x < cell && touching(x) {
+                while x < cell && foot[x] {
                     x += 1;
                 }
-                // 넓게 바닥에 닿은 부분은 발이 아니라 앉은 엉덩이·배다.
-                if x - start > 20 {
-                    continue;
+                let (start, end) = (start as i32, x as i32);
+                match end - start {
+                    // 너무 좁은 조각은 발이 아니다.
+                    0..=2 => {}
+                    3..=20 => runs.push((start, end)),
+                    21..=32 => {
+                        let mid = (start + end) / 2;
+                        runs.push((start, mid));
+                        runs.push((mid + 1, end));
+                    }
+                    // 넓게 바닥에 닿은 부분은 발이 아니라 앉은 엉덩이·배다.
+                    _ => {}
                 }
-                for fx in start..x {
-                    let Some(bottom) = lowest[fx] else { continue };
-                    for y in (bottom - 5)..=bottom {
-                        if atlas.get(ox + fx as i32, oy + y)[3] > 128 {
-                            let c = if y == bottom {
-                                shade(color, 0.6)
-                            } else if y == bottom - 5 {
-                                shade(color, 1.25)
-                            } else {
-                                color
-                            };
-                            atlas.set(ox + fx as i32, oy + y, c);
+            }
+            for (run_start, run_end) in runs {
+                let (mut start, mut end) = (run_start, run_end);
+                // 이 발의 바닥 줄과 장화 목 높이(발 전체에서 일자).
+                let sole = (start..end).filter_map(|fx| lowest[fx as usize]).max().unwrap_or(ground);
+                // 밝은 발끝만 덮으면 발 위에 상자를 붙인 것처럼 보인다. 발 가장자리의 어두운 윤곽까지 넓혀 발 전체를 감싼다.
+                // 윤곽은 얇으므로, 몇 칸 밖이 바로 빈 곳일 때만 넓힌다(옆 다리나 앉은 몸통으로 번지지 않게).
+                let solid = |fx: i32| (sole - 4..=sole - 1).any(|y| atlas.get(ox + fx, oy + y)[3] > 128);
+                let open = |fx: i32, dir: i32| (1..=3).any(|d| atlas.get(ox + fx + dir * d, oy + sole - 2)[3] <= 128);
+                for _ in 0..3 {
+                    if start > 0 && !foot[(start - 1) as usize] && solid(start - 1) && open(start - 1, -1) {
+                        start -= 1;
+                    }
+                    if end < cell as i32 && !foot[end as usize] && solid(end) && open(end, 1) {
+                        end += 1;
+                    }
+                }
+
+                // 작은 발에는 낮은 장화를 신긴다.
+                let height = ((end - start) * 3 / 4).clamp(7, BOOT_H);
+                let top = sole - height + 1;
+                for fx in start..end {
+                    let bottom = lowest[fx as usize].unwrap_or(sole).min(sole);
+                    for y in top..=sole {
+                        // 목단 모서리는 한 칸 깎아 둥글게 한다.
+                        if y == top && (fx == start || fx == end - 1) {
+                            continue;
                         }
+                        let inside = atlas.get(ox + fx, oy + y)[3] > 128;
+                        // 발끝 아래의 둥근 빈틈은 밑창으로 메워 바닥을 평평하게 한다.
+                        if !inside && y <= bottom {
+                            continue;
+                        }
+                        let c = if y >= sole {
+                            SOLE
+                        } else if y == top {
+                            shade(color, 1.35)
+                        } else if y == top + 1 {
+                            shade(color, 1.15)
+                        } else if y == top + 2 {
+                            shade(color, 0.7)
+                        } else if fx == start || fx == end - 1 {
+                            shade(color, 0.55)
+                        } else if (fx == start + 2 || fx == start + 3) && (y == sole - 3 || y == sole - 4) {
+                            shade(color, 1.4)
+                        } else {
+                            color
+                        };
+                        atlas.set(ox + fx, oy + y, c);
                     }
                 }
             }
         }
     }
+}
+
+/// 상점에 보여 줄 장화 그림.
+pub fn boot_icon(color: Rgba) -> Art {
+    Art::from_ascii(
+        &[
+            "...LLLLL....",
+            "...lllll....",
+            "...ddddd....",
+            "...ccccc....",
+            "...cHccc....",
+            "...cHccc....",
+            "...cccccc...",
+            "...cccccccc.",
+            "..cccccccHcc",
+            "..cccccccccc",
+            "..ssssssssss",
+        ],
+        &[('L', shade(color, 1.35)), ('l', shade(color, 1.15)), ('d', shade(color, 0.7)), ('c', color), ('H', shade(color, 1.4)), ('s', SOLE)],
+        true,
+    )
 }
 
 /// 옷: 몸통 털 위에 줄무늬 조끼를 덧칠한다. 옷 입은 프레임 에셋이 생기기 전까지의 임시 방식이다.
