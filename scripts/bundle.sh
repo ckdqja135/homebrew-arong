@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSMicrophoneUsageDescription</key><string>훈련 화면에서 "말로 훈련"을 켠 동안만, 앉아·왼손 같은 명령을 듣기 위해 마이크를 씁니다. 소리는 저장하지 않습니다.</string>
+    <key>NSMicrophoneUsageDescription</key><string>훈련 화면에서 "말로 훈련"을 켠 동안, 또는 따로 켠 "항상 듣기" 동안, 앉아·왼손 같은 명령과 이름(아롱아)을 듣기 위해 마이크를 씁니다. 소리는 저장하지 않습니다.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>말한 명령(앉아, 왼손, 오른손, 엎드려, 일어서)과 이름(아롱아)을 이 Mac 안에서만 인식합니다. 인식한 문장은 저장하지 않습니다.</string>
 </dict>
 </plist>

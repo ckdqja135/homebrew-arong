@@ -41,6 +41,12 @@ const DOORWAY_SECS: f64 = 1.1;
 const VOICE_IDLE_SECS: f64 = 30.0;
 /// 이름을 부른 뒤 명령이 이어지는지 기다리는 시간(초).
 const NAME_WAIT_SECS: f64 = 0.9;
+/// 이름을 부른 뒤 이만큼(초)은 이름 없이 말한 명령도 따른다(항상 듣기).
+const ATTENTION_SECS: f64 = 8.0;
+/// 항상 듣기 중에 인식을 새로 여는 간격(초).
+const LISTENER_RESTART_SECS: f64 = 45.0;
+/// 항상 듣기가 실패한 뒤 다시 시도하는 간격(초).
+const LISTENER_RETRY_SECS: f64 = 5.0;
 /// 가장 깊이 들어갔을 때 줄어드는 정도와, 흐려지기 시작하는 진행도.
 const DOORWAY_SHRINK: f64 = 0.68;
 const DOORWAY_FADE_FROM: f64 = 0.55;
@@ -341,6 +347,8 @@ pub struct Ivars {
     tiles_trash: RefCell<Vec<Retained<TilePanel>>>,
     tile_actions: RefCell<Vec<TileAction>>,
     tiles_open: Cell<bool>,
+    /// 지금 떠 있는 타일 메뉴가 훈련 화면인지.
+    tiles_training: Cell<bool>,
     /// 방금 메뉴를 띄운 자리와, 사용자가 끌어다 놓은 자리(왼쪽 위 모서리).
     /// 끌어다 놓은 뒤에는 하위 메뉴로 넘어가도 그 자리에 띄운다. 아롱이를 다시 우클릭하면 잊는다.
     tiles_placed: Cell<CGPoint>,
@@ -377,6 +385,12 @@ pub struct Ivars {
     voice_until: Cell<Option<Instant>>,
     /// 말로 훈련 중 이름("아롱아")이 들린 시각. 명령이 이어지지 않으면 이름에 반응한다.
     name_heard: Cell<Option<Instant>>,
+    /// 항상 듣기: 사용자가 따로 동의하고 켠 설정. 켜져 있으면 앱이 도는 동안 마이크를 열어 이름을 기다린다.
+    voice_always: Cell<bool>,
+    /// 이름을 부른 뒤 귀 기울이는 시간의 끝, 지금 듣는 인식을 연 시각, 항상 듣기 실패를 이미 알렸는지.
+    attention_until: Cell<Option<Instant>>,
+    listener_since: Cell<Option<Instant>>,
+    listen_failed: Cell<bool>,
     /// AI 사용량 집계: 사용자가 켰는지, 실제로 돌고 있는 루프백 수신기.
     ai_on: Cell<bool>,
     receiver: RefCell<Option<crate::otel::Receiver>>,
@@ -1277,9 +1291,13 @@ define_class!(
         fn toggle_voice(&self, _s: Option<&AnyObject>) {
             let iv = self.ivars();
             if iv.voice_on.get() {
-                self.stop_listening();
                 iv.voice_on.set(false);
                 self.save_flag("voice", false);
+                // 음성 명령을 끄면 항상 듣기도 같이 꺼서, 다시 켤 때 마이크가 저절로 열리지 않게 한다.
+                iv.voice_always.set(false);
+                self.save_flag("voice_always", false);
+                self.stop_listening();
+                self.sync_voice_mark();
                 self.bubble("음성 명령 끔");
             } else {
                 self.enable_voice();
@@ -1289,6 +1307,12 @@ define_class!(
         #[unsafe(method(voiceTick:))]
         fn voice_tick(&self, _t: &NSTimer) {
             let iv = self.ivars();
+            let always = self.always_listening();
+            let session = iv.voice_until.get().is_some();
+            if !always && !session {
+                self.stop_listening();
+                return;
+            }
             let heard = iv.listener.borrow().as_ref().and_then(|l| l.heard());
             // 이름만 들렸으면 바로 반응하지 않고 잠깐 기다린다. "아롱아 앉아"처럼 명령이 이어질 수 있다.
             let heard = match heard {
@@ -1301,31 +1325,94 @@ define_class!(
                 other => other,
             };
             let called = heard.is_none() && iv.name_heard.get().is_some_and(|at| at.elapsed().as_secs_f64() >= NAME_WAIT_SECS);
+            let now = Instant::now();
             if heard.is_some() || called {
                 // 알아들은 것을 따르고, 다음 말을 위해 새로 듣기 시작한다.
                 // (인식기는 지금까지 들은 문장을 계속 이어 붙이므로, 매번 새로 열어야 같은 말이 두 번 처리되지 않는다.)
                 iv.listener.replace(None);
                 iv.name_heard.set(None);
+                // 말로 훈련 중이거나, 방금 이름을 불러 아롱이가 귀 기울이는 동안에만 이름 없는 명령을 따른다.
+                // (항상 듣기 중에 지나가는 말 속의 "앉아", "오른쪽"에 반응하지 않게.)
+                let attentive = session || iv.attention_until.get().is_some_and(|until| now < until);
+                let attention = Some(now + std::time::Duration::from_secs_f64(ATTENTION_SECS));
                 match heard {
-                    Some(Heard::Command(command)) => self.do_command(command),
-                    _ => self.answer_name(),
-                }
-                match crate::voice::Listener::start() {
-                    Ok(listener) => {
-                        iv.listener.replace(Some(listener));
-                        iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
+                    Some(Heard::Called(command)) => {
+                        self.do_command(command);
+                        iv.attention_until.set(attention);
                     }
-                    Err(reason) => {
-                        self.stop_listening();
-                        self.bubble(reason);
+                    Some(Heard::Command(command)) if attentive => self.do_command(command),
+                    Some(Heard::Command(_)) => {}
+                    _ => {
+                        self.answer_name();
+                        iv.attention_until.set(attention);
                     }
                 }
+                if session {
+                    iv.voice_until.set(Some(now + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
+                }
+                self.restart_listener();
                 self.refresh_training_tiles();
-            } else if iv.voice_until.get().is_none_or(|until| Instant::now() >= until) {
-                // 한동안 명령이 없으면 마이크를 닫는다.
-                self.stop_listening();
-                self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
+            } else if iv.voice_until.get().is_some_and(|until| now >= until) {
+                // 한동안 명령이 없으면 말로 훈련을 끝낸다. 항상 듣기가 아니면 마이크도 닫는다.
+                iv.voice_until.set(None);
+                if always {
+                    self.bubble("말로 훈련 끝 (항상 듣기는 계속 켜져 있어요)");
+                } else {
+                    self.stop_listening();
+                    self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
+                }
                 self.refresh_training_tiles();
+            } else if always
+                && iv.name_heard.get().is_none()
+                && iv.listener_since.get().is_none_or(|since| {
+                    // 실패한 상태면(권한을 막 허용했을 수 있다) 더 자주 다시 시도한다.
+                    let wait = if iv.listen_failed.get() { LISTENER_RETRY_SECS } else { LISTENER_RESTART_SECS };
+                    since.elapsed().as_secs_f64() >= wait
+                })
+            {
+                // 오래 열어 둔 인식은 조용히 멈추는 일이 있어서 주기적으로 새로 연다. 실패했으면 같은 간격으로 다시 시도한다.
+                self.restart_listener();
+            }
+        }
+
+        #[unsafe(method(toggleAlways:))]
+        fn toggle_always(&self, _s: Option<&AnyObject>) {
+            let iv = self.ivars();
+            if iv.voice_always.get() {
+                iv.voice_always.set(false);
+                self.save_flag("voice_always", false);
+                // 말로 훈련 중이 아니면 마이크를 바로 닫는다.
+                if iv.voice_until.get().is_none() {
+                    self.stop_listening();
+                }
+                self.sync_voice_mark();
+                self.bubble("항상 듣기 끔 (마이크를 닫았어요)");
+                return;
+            }
+            if !iv.voice_on.get() {
+                self.bubble("먼저 음성 명령을 켜 주세요");
+                return;
+            }
+            if !self.voice_permitted() {
+                return;
+            }
+            let mtm = self.mtm();
+            NSApplication::sharedApplication(mtm).activate();
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(ns_string!("항상 듣기를 켤까요? (마이크를 계속 사용)"));
+            alert.setInformativeText(ns_string!(
+                "켜 두면 아롱이가 실행 중인 내내 마이크를 열어 두고, '아롱아' 하고 부르는 소리를 기다립니다.\n\n· 부르면 정면을 바라봅니다. '아롱아 앉아'처럼 이름을 붙이거나, 부른 뒤 몇 초 안에 말한 명령도 따릅니다. 이름 없이 지나가는 말은 따르지 않습니다.\n· 마이크를 쓰는 동안 화면 위쪽에 macOS의 주황색 마이크 표시가 계속 떠 있습니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다. 소리와 인식된 문장은 저장하지 않습니다.\n· 계속 인식하므로 배터리를 더 씁니다.\n\n더보기 메뉴에서 언제든 끌 수 있고, 끄면 마이크를 바로 닫습니다."
+            ));
+            alert.addButtonWithTitle(ns_string!("취소"));
+            alert.addButtonWithTitle(ns_string!("켜기"));
+            if alert.runModal() != objc2_app_kit::NSAlertSecondButtonReturn {
+                return;
+            }
+            iv.voice_always.set(true);
+            self.save_flag("voice_always", true);
+            self.sync_always();
+            if iv.listener.borrow().is_some() {
+                self.bubble("항상 듣기 켬 · \"아롱아\" 하고 불러 보세요");
             }
         }
 
@@ -1593,6 +1680,7 @@ impl Controller {
         let ai_on = flag("ai", false);
         // 음성 명령도 기본은 꺼짐이다.
         let voice_on = flag("voice", false);
+        let voice_always = flag("voice_always", false);
         // 새 버전 확인은 물어본 적이 없으면 None이다. 동의하기 전에는 접속하지 않는다.
         let update_on = store.as_ref().and_then(|s| s.setting("update_check")).map(|v| v == "1");
         let ivars = Ivars {
@@ -1640,6 +1728,7 @@ impl Controller {
             tiles_trash: RefCell::new(Vec::new()),
             tile_actions: RefCell::new(Vec::new()),
             tiles_open: Cell::new(false),
+            tiles_training: Cell::new(false),
             tiles_placed: Cell::new(CGPoint::new(0.0, 0.0)),
             tiles_scroll: RefCell::new(None),
             tiles_count: Cell::new(0),
@@ -1664,6 +1753,10 @@ impl Controller {
             voice_timer: RefCell::new(None),
             voice_until: Cell::new(None),
             name_heard: Cell::new(None),
+            voice_always: Cell::new(voice_always),
+            attention_until: Cell::new(None),
+            listener_since: Cell::new(None),
+            listen_failed: Cell::new(false),
             ai_on: Cell::new(ai_on),
             receiver: RefCell::new(None),
             rng: Cell::new(now_wall() as u64 | 1),
@@ -1805,6 +1898,8 @@ impl Controller {
         self.apply_visibility();
         self.sync_typing();
         self.sync_ai();
+        // 항상 듣기를 켜 둔 채 끝냈으면 다시 연다(사용자가 동의하고 켠 설정이다).
+        self.sync_always();
         self.save();
         match iv.update_on.get() {
             Some(true) => self.sync_update(),
@@ -2309,6 +2404,9 @@ impl Controller {
                 == objc2_service_management::SMAppServiceStatus::Enabled
         };
         add("음성 명령 (훈련에서 누를 때만 마이크 사용)", Some(sel!(toggleVoice:)), iv.voice_on.get());
+        if iv.voice_on.get() {
+            add("  항상 듣기 (\"아롱아\" 부르기 · 마이크 계속 사용)", Some(sel!(toggleAlways:)), iv.voice_always.get());
+        }
         add("Mac 켤 때 자동 실행", Some(sel!(toggleLogin:)), login_on);
         add("새 버전 확인 (하루 한 번 GitHub 접속)", Some(sel!(toggleUpdate:)), iv.update_on.get() == Some(true));
         if let Some(version) = iv.new_version.borrow().as_ref() {
@@ -2782,6 +2880,7 @@ impl Controller {
             iv.tiles_trash.borrow_mut().push(old);
         }
         iv.tile_actions.replace(actions);
+        iv.tiles_training.set(false);
         iv.tiles_open.set(true);
         panel.makeKeyAndOrderFront(None);
     }
@@ -2807,10 +2906,10 @@ impl Controller {
             TileAction::Train(command) => {
                 if self.voice_only() {
                     // 마이크가 있으면 말로만 시킨다. 타일을 누르면 듣기를 시작하고 무슨 말을 하면 되는지 알려 준다.
-                    if self.ivars().listener.borrow().is_none() {
+                    if self.ivars().voice_until.get().is_none() {
                         self.start_listening();
                     }
-                    if self.ivars().listener.borrow().is_some() {
+                    if self.ivars().voice_until.get().is_some() {
                         self.bubble(&format!("\"{}!\" 하고 말해 주세요", command.name()));
                     }
                 } else {
@@ -2900,7 +2999,7 @@ impl Controller {
             Self::stop(&iv.typing_timer);
         }
         // 메뉴 막대의 점: 지금 실제로 집계 중이라는 표시.
-        self.set_status_title(if iv.keytap.borrow().is_some() { "•" } else { "" });
+        self.sync_voice_mark();
     }
 
     /// 쌓인 타건 수를 경험치로 반영한다.
@@ -2945,7 +3044,7 @@ impl Controller {
             };
             tiles.push(TileSpec { icon, caption, enabled: locked.is_none(), active: false, action: TileAction::Train(command) });
         }
-        let listening = iv.listener.borrow().is_some();
+        let listening = iv.voice_until.get().is_some();
         tiles.push(TileSpec {
             icon: TileIcon::Symbol(&["mic.fill"]),
             caption: if listening { "듣는 중 · 끝내기" } else { "말로 훈련" }.to_string(),
@@ -2966,11 +3065,14 @@ impl Controller {
             "눌러서 시키기 · % 는 숙련도(높을수록 잘 따라 해요)"
         };
         self.show_tiles(&format!("훈련 · Lv {level} · 친밀도 {affinity}"), hint, tiles);
+        self.ivars().tiles_training.set(true);
     }
 
     /// 훈련 화면이 열려 있으면 숙련도와 "듣는 중" 표시를 새로 그린다.
     fn refresh_training_tiles(&self) {
-        if self.ivars().tiles_open.get() {
+        // 훈련 화면이 떠 있을 때만 다시 그린다. 다른 메뉴(상점 등)를 보고 있는데 훈련 화면으로 바꿔 버리면 안 된다.
+        let iv = self.ivars();
+        if iv.tiles_open.get() && iv.tiles_training.get() {
             self.open_training_tiles();
         }
     }
@@ -2986,7 +3088,7 @@ impl Controller {
             self.stop_roam();
             self.perform(Act::Look);
         }
-        self.bubble("멍! (불렀어요?)");
+        self.bubble("불렀냐 멍!");
     }
 
     /// 훈련을 말로만 하는 상태인지: 음성 명령을 켰고, 권한이 있고, 마이크가 연결돼 있을 때.
@@ -3107,41 +3209,140 @@ impl Controller {
             self.enable_voice();
             return;
         }
-        if iv.listener.borrow().is_some() {
-            self.stop_listening();
-            self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
+        if iv.voice_until.get().is_some() {
+            iv.voice_until.set(None);
+            if self.always_listening() {
+                self.bubble("말로 훈련 끝 (항상 듣기는 계속 켜져 있어요)");
+            } else {
+                self.stop_listening();
+                self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
+            }
             return;
         }
+        if !self.voice_permitted() {
+            return;
+        }
+        // 항상 듣기로 이미 열려 있으면 그대로 쓴다.
+        if iv.listener.borrow().is_none() {
+            match crate::voice::Listener::start() {
+                Ok(listener) => {
+                    iv.listener.replace(Some(listener));
+                    iv.listener_since.set(Some(Instant::now()));
+                }
+                Err(reason) => {
+                    self.bubble(reason);
+                    return;
+                }
+            }
+        }
+        iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
+        self.ensure_voice_timer();
+        self.bubble("말해 보세요: 앉아 / 왼손 / 오른손 / 엎드려 / 일어서 / 아롱아 (끝내려면 다시 누르기)");
+    }
+
+    /// 음성 인식 권한이 있는지. 없으면 macOS에 묻게 하거나, 이미 거부된 상태면 시스템 설정의 해당 화면을 열어 준다.
+    /// (앱을 업데이트하면 macOS가 전에 준 권한을 다시 확인하게 하는 일이 있다.)
+    fn voice_permitted(&self) -> bool {
         match crate::voice::permission() {
+            crate::voice::Permission::Allowed => true,
             crate::voice::Permission::NotAsked => {
                 crate::voice::request_permission();
-                self.bubble("권한을 허용한 뒤 다시 눌러 주세요");
-                return;
+                self.bubble("권한 창에서 허용한 뒤 다시 눌러 주세요");
+                false
             }
             crate::voice::Permission::Denied => {
-                self.bubble("시스템 설정에서 아롱이의 음성 인식을 허용해 주세요");
-                return;
+                let url = objc2_foundation::NSURL::URLWithString(ns_string!(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+                ));
+                if let Some(url) = url {
+                    NSWorkspace::sharedWorkspace().openURL(&url);
+                }
+                self.bubble("시스템 설정의 '음성 인식'에서 Arong을 켠 뒤 다시 눌러 주세요");
+                false
             }
-            crate::voice::Permission::Allowed => {}
-        }
-        match crate::voice::Listener::start() {
-            Ok(listener) => {
-                iv.listener.replace(Some(listener));
-                iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
-                Self::stop(&iv.voice_timer);
-                iv.voice_timer.replace(Some(self.timer(0.15, sel!(voiceTick:), true, 0.05)));
-                self.bubble("말해 보세요: 앉아 / 왼손 / 오른손 / 엎드려 / 일어서 / 아롱아 (끝내려면 다시 누르기)");
-            }
-            Err(reason) => self.bubble(reason),
         }
     }
 
-    /// 듣기를 끝낸다. 리스너를 버리는 순간 마이크가 닫힌다.
+    fn ensure_voice_timer(&self) {
+        let iv = self.ivars();
+        if iv.voice_timer.borrow().is_none() {
+            iv.voice_timer.replace(Some(self.timer(0.15, sel!(voiceTick:), true, 0.05)));
+        }
+    }
+
+    /// 항상 듣기가 실제로 켜진 상태인지(음성 명령 자체를 끄면 같이 꺼진 것으로 본다).
+    fn always_listening(&self) -> bool {
+        let iv = self.ivars();
+        iv.voice_on.get() && iv.voice_always.get()
+    }
+
+    /// 항상 듣기 설정에 맞춰 마이크를 열거나 닫는다.
+    fn sync_always(&self) {
+        let iv = self.ivars();
+        if self.always_listening() {
+            if iv.listener.borrow().is_none() {
+                self.restart_listener();
+            }
+            self.ensure_voice_timer();
+        } else if iv.voice_until.get().is_none() {
+            self.stop_listening();
+        }
+        self.sync_voice_mark();
+    }
+
+    /// 듣던 인식을 닫고 새로 연다. 실패하면 말로 훈련은 끝내고, 항상 듣기는 나중에 다시 시도한다.
+    fn restart_listener(&self) {
+        let iv = self.ivars();
+        iv.listener.replace(None);
+        let first = iv.listener_since.replace(Some(Instant::now())).is_none();
+        match crate::voice::Listener::start() {
+            Ok(listener) => {
+                if iv.listen_failed.get() || first {
+                    eprintln!("voice: listening");
+                }
+                iv.listener.replace(Some(listener));
+                iv.listen_failed.set(false);
+            }
+            Err(reason) => {
+                // 진단용: 상태만 남긴다(소리나 인식된 말은 남기지 않는다).
+                eprintln!("voice: listener failed: {reason} (permission {:?})", crate::voice::permission());
+                let session = iv.voice_until.replace(None).is_some();
+                if !self.always_listening() {
+                    self.stop_listening();
+                }
+                // 항상 듣기의 재시도 실패는 한 번만 알린다.
+                if session || !iv.listen_failed.replace(true) {
+                    self.bubble(reason);
+                    // 항상 듣기를 켜 둔 채 권한이 풀렸으면(앱을 업데이트한 뒤 등) 권한을 다시 받도록 안내한다.
+                    if self.always_listening() && crate::voice::permission() != crate::voice::Permission::Allowed {
+                        self.voice_permitted();
+                    }
+                }
+            }
+        }
+        self.sync_voice_mark();
+    }
+
+    /// 메뉴 막대 표시: 타이핑 집계 중이면 점, 항상 듣기로 마이크가 열려 있으면 귀 모양.
+    fn sync_voice_mark(&self) {
+        let iv = self.ivars();
+        let typing = iv.keytap.borrow().is_some();
+        let hearing = self.always_listening() && iv.listener.borrow().is_some();
+        self.set_status_title(match (typing, hearing) {
+            (true, true) => "•◉",
+            (true, false) => "•",
+            (false, true) => "◉",
+            (false, false) => "",
+        });
+    }
+
     fn stop_listening(&self) {
         let iv = self.ivars();
         Self::stop(&iv.voice_timer);
         iv.voice_until.set(None);
         iv.name_heard.set(None);
+        iv.attention_until.set(None);
+        iv.listener_since.set(None);
         iv.listener.replace(None);
     }
 

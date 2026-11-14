@@ -77,22 +77,28 @@ impl Command {
 /// 음성에서 알아들은 것: 훈련 명령이거나, 이름을 부른 것.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Heard {
+    /// 명령만 말했다.
     Command(Command),
-    /// "아롱아" 하고 불렀다.
+    /// 이름을 부르면서 명령했다("아롱아 앉아").
+    Called(Command),
+    /// "아롱아" 하고 부르기만 했다.
     Name,
 }
 
 impl Heard {
-    /// 명령이 들어 있으면 명령이 우선이다("아롱아 앉아" → 앉아). 이름만 불렀으면 `Name`.
     /// 인식된 문장 자체는 어디에도 남기지 않는다.
     pub fn from_speech(text: &str) -> Option<Heard> {
-        if let Some(command) = Command::from_speech(text) {
-            return Some(Heard::Command(command));
-        }
+        let command = Command::from_speech(text);
         let said: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
         // 흔한 오인식 표기도 받아 준다.
-        let names = ["아롱", "아룡", "아농", "알옹", "아론아", "아롬"];
-        names.iter().any(|name| said.contains(name)).then_some(Heard::Name)
+        let names = ["아롱", "아룡", "아농", "알옹", "아론", "아롬", "아랑아", "아렁아", "어롱", "아롱", "야롱", "아옹아", "아놓아"];
+        let named = names.iter().any(|name| said.contains(name));
+        match (command, named) {
+            (Some(command), true) => Some(Heard::Called(command)),
+            (Some(command), false) => Some(Heard::Command(command)),
+            (None, true) => Some(Heard::Name),
+            (None, false) => None,
+        }
     }
 }
 
@@ -215,7 +221,10 @@ mod tests {
         // 이름만 부르면 이름, 명령이 같이 있으면 명령.
         assert_eq!(Heard::from_speech("아롱아~"), Some(Heard::Name));
         assert_eq!(Heard::from_speech("아롱이!"), Some(Heard::Name));
-        assert_eq!(Heard::from_speech("아롱아 앉아"), Some(Heard::Command(Command::Sit)));
+        assert_eq!(Heard::from_speech("아론아"), Some(Heard::Name));
+        assert_eq!(Heard::from_speech("아랑아"), Some(Heard::Name));
+        assert_eq!(Heard::from_speech("아롱아 앉아"), Some(Heard::Called(Command::Sit)));
+        assert_eq!(Heard::from_speech("앉아"), Some(Heard::Command(Command::Sit)));
         assert_eq!(Heard::from_speech("오늘 날씨 좋다"), None);
         for command in Command::ALL {
             assert_eq!(Command::from_speech(command.name()), Some(command));
