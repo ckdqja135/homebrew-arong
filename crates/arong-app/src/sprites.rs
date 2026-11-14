@@ -111,31 +111,46 @@ static OUTFITS: [(&str, usize, [&[u8]; 9]); 27] = [
     outfit!("sky_puffer", 2, "adult"),
 ];
 
-/// 색만 다른 옷: (옷 id, 그림을 빌려 쓰는 옷 id, 옷 색으로 볼 색상 폭(도), 옷 색으로 볼 가장 밝은 밝기).
+/// 색만 다른 옷: (옷 id, 그림을 빌려 쓰는 옷 id, 옷 색으로 볼 색상 폭(도), 가장 밝은 밝기, 가장 낮은 채도).
 /// 그림을 따로 두지 않고, 읽을 때 옷 색만 `art::wear_color`로 바꾼다.
-static OUTFIT_COLORS: [(&str, &str, f64, f64); 14] = [
-    ("red_knit", "blue_knit", 30.0, 1.0),
-    ("yellow_knit", "blue_knit", 30.0, 1.0),
-    ("pink_knit", "blue_knit", 30.0, 1.0),
-    ("green_knit", "blue_knit", 30.0, 1.0),
-    ("sky_hoodie", "coral_hoodie", 30.0, 1.0),
-    ("yellow_hoodie", "coral_hoodie", 30.0, 1.0),
-    ("mint_hoodie", "coral_hoodie", 30.0, 1.0),
-    ("purple_hoodie", "coral_hoodie", 30.0, 1.0),
+static OUTFIT_COLORS: [(&str, &str, f64, f64, f64); 26] = [
+    ("red_knit", "blue_knit", 30.0, 1.0, 0.3),
+    ("yellow_knit", "blue_knit", 30.0, 1.0, 0.3),
+    ("pink_knit", "blue_knit", 30.0, 1.0, 0.3),
+    ("green_knit", "blue_knit", 30.0, 1.0, 0.3),
+    ("sky_hoodie", "coral_hoodie", 30.0, 1.0, 0.3),
+    ("yellow_hoodie", "coral_hoodie", 30.0, 1.0, 0.3),
+    ("mint_hoodie", "coral_hoodie", 30.0, 1.0, 0.3),
+    ("purple_hoodie", "coral_hoodie", 30.0, 1.0, 0.3),
     // 한복은 저고리의 청록색만 바꾼다. 색동 소매의 파랑·하늘색 줄은 건드리지 않도록 색상 폭과 밝기를 좁게 둔다.
-    ("pink_hanbok", "teal_hanbok", 14.0, 0.7),
-    ("yellow_hanbok", "teal_hanbok", 14.0, 0.7),
-    ("yellow_dino", "green_dino", 30.0, 1.0),
-    ("white_dino", "green_dino", 30.0, 1.0),
-    ("pink_dino", "green_dino", 30.0, 1.0),
-    ("red_dino", "green_dino", 30.0, 1.0),
+    ("pink_hanbok", "teal_hanbok", 14.0, 0.7, 0.3),
+    ("yellow_hanbok", "teal_hanbok", 14.0, 0.7, 0.3),
+    ("yellow_dino", "green_dino", 30.0, 1.0, 0.3),
+    ("white_dino", "green_dino", 30.0, 1.0, 0.3),
+    ("pink_dino", "green_dino", 30.0, 1.0, 0.3),
+    ("red_dino", "green_dino", 30.0, 1.0, 0.3),
+    ("red_trench", "camel_trench", 30.0, 1.0, 0.25),
+    ("pink_trench", "camel_trench", 30.0, 1.0, 0.25),
+    ("sky_trench", "camel_trench", 30.0, 1.0, 0.25),
+    ("olive_trench", "camel_trench", 30.0, 1.0, 0.25),
+    // 망토와 패딩은 파스텔이라 흐린 픽셀까지 옷 색으로 본다. 크림색 곰 무늬·줄무늬는 색상이 달라 그대로 남는다.
+    ("pink_cape", "lavender_cape", 30.0, 1.0, 0.1),
+    ("sky_cape", "lavender_cape", 30.0, 1.0, 0.1),
+    ("yellow_cape", "lavender_cape", 30.0, 1.0, 0.1),
+    ("mint_cape", "lavender_cape", 30.0, 1.0, 0.1),
+    ("pink_puffer", "sky_puffer", 25.0, 1.0, 0.15),
+    ("yellow_puffer", "sky_puffer", 25.0, 1.0, 0.15),
+    ("red_puffer", "sky_puffer", 25.0, 1.0, 0.15),
+    ("purple_puffer", "sky_puffer", 25.0, 1.0, 0.15),
 ];
 
 /// (그림을 가진 옷 id, 바꿔 칠하는 방법).
 fn outfit_source(id: &str) -> (&str, Option<art::Tint>) {
     match OUTFIT_COLORS.iter().find(|(variant, ..)| *variant == id) {
-        Some(&(_, source, spread, brightest)) => {
-            let tint = art::wear_color(source).zip(art::wear_color(id)).map(|(from, to)| art::Tint { from, to, spread, brightest });
+        Some(&(_, source, spread, brightest, min_sat)) => {
+            let tint = art::wear_color(source)
+                .zip(art::wear_color(id))
+                .map(|(from, to)| art::Tint { from, to, spread, brightest, min_sat });
             (source, tint)
         }
         None => (id, None),

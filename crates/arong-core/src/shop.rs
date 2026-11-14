@@ -53,7 +53,7 @@ const fn def(id: &'static str, name: &'static str, price: i64, slot: Slot) -> It
     ItemDef { id, name, price, slot }
 }
 
-pub const ITEMS: [ItemDef; 61] = [
+pub const ITEMS: [ItemDef; 73] = [
     def("party", "파티 고깔", 60, Slot::Hat),
     def("beanie", "빨간 비니", 150, Slot::Hat),
     def("straw", "밀짚모자", 200, Slot::Hat),
@@ -107,9 +107,21 @@ pub const ITEMS: [ItemDef; 61] = [
     def("white_dino", "하양 공룡", 650, Slot::Clothes),
     def("pink_dino", "분홍 공룡", 650, Slot::Clothes),
     def("red_dino", "빨강 공룡", 650, Slot::Clothes),
-    def("camel_trench", "트렌치코트", 800, Slot::Clothes),
-    def("lavender_cape", "곰돌이 망토", 700, Slot::Clothes),
-    def("sky_puffer", "곰돌이 패딩", 750, Slot::Clothes),
+    def("camel_trench", "카멜 트렌치", 800, Slot::Clothes),
+    def("red_trench", "빨강 트렌치", 800, Slot::Clothes),
+    def("pink_trench", "분홍 트렌치", 800, Slot::Clothes),
+    def("sky_trench", "하늘 트렌치", 800, Slot::Clothes),
+    def("olive_trench", "올리브 트렌치", 800, Slot::Clothes),
+    def("lavender_cape", "보라 곰 망토", 700, Slot::Clothes),
+    def("pink_cape", "분홍 곰 망토", 700, Slot::Clothes),
+    def("sky_cape", "하늘 곰 망토", 700, Slot::Clothes),
+    def("yellow_cape", "노랑 곰 망토", 700, Slot::Clothes),
+    def("mint_cape", "민트 곰 망토", 700, Slot::Clothes),
+    def("sky_puffer", "하늘 곰 패딩", 750, Slot::Clothes),
+    def("pink_puffer", "분홍 곰 패딩", 750, Slot::Clothes),
+    def("yellow_puffer", "노랑 곰 패딩", 750, Slot::Clothes),
+    def("red_puffer", "빨강 곰 패딩", 750, Slot::Clothes),
+    def("purple_puffer", "보라 곰 패딩", 750, Slot::Clothes),
     def("red_boots", "빨간 장화", 180, Slot::Shoes),
     def("yellow_boots", "노란 장화", 180, Slot::Shoes),
     def("blue_boots", "파란 장화", 180, Slot::Shoes),

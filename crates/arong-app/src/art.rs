@@ -642,6 +642,8 @@ pub struct Tint {
     pub spread: f64,
     /// 이보다 밝은 픽셀은 옷 색으로 보지 않는다(같은 계열의 밝은 줄무늬를 남길 때 쓴다). 1.0이면 제한 없음.
     pub brightest: f64,
+    /// 이보다 흐린(채도가 낮은) 픽셀은 옷 색으로 보지 않는다. 파스텔 옷은 낮게 준다.
+    pub min_sat: f64,
 }
 
 fn from_hsv(h: f64, s: f64, v: f64) -> Rgba {
@@ -667,7 +669,7 @@ pub fn tint_garment(dressed: &mut Art, bare: &Art, tint: &Tint) {
     for (pixel, under) in dressed.px.iter_mut().zip(&bare.px) {
         let (h, s, v) = hsv(*pixel);
         let apart = (h - base_h).rem_euclid(360.0);
-        if pixel[3] > 128 && pixel != under && s > 0.3 && apart.min(360.0 - apart) <= tint.spread && v <= tint.brightest {
+        if pixel[3] > 128 && pixel != under && s > tint.min_sat && apart.min(360.0 - apart) <= tint.spread && v <= tint.brightest {
             *pixel = from_hsv(to_h, (s * to_s / base_s).min(1.0), (v * to_v / base_v).min(1.0));
         }
     }
@@ -705,9 +707,21 @@ pub fn wear_color(id: &str) -> Option<Rgba> {
         "white_dino" => [236, 236, 230, 255],
         "pink_dino" => [246, 128, 176, 255],
         "red_dino" => [222, 62, 62, 255],
-        "camel_trench" => [196, 152, 92, 255],
-        "lavender_cape" => [176, 138, 220, 255],
-        "sky_puffer" => [108, 204, 232, 255],
+        "camel_trench" => [164, 127, 89, 255],
+        "red_trench" => [206, 70, 66, 255],
+        "pink_trench" => [236, 138, 170, 255],
+        "sky_trench" => [112, 176, 226, 255],
+        "olive_trench" => [128, 156, 78, 255],
+        "lavender_cape" => [187, 142, 203, 255],
+        "pink_cape" => [246, 150, 184, 255],
+        "sky_cape" => [130, 196, 240, 255],
+        "yellow_cape" => [248, 214, 100, 255],
+        "mint_cape" => [120, 214, 180, 255],
+        "sky_puffer" => [120, 202, 218, 255],
+        "pink_puffer" => [246, 140, 180, 255],
+        "yellow_puffer" => [248, 206, 70, 255],
+        "red_puffer" => [226, 76, 70, 255],
+        "purple_puffer" => [164, 124, 226, 255],
         "yellow_boots" => [246, 200, 52, 255],
         "blue_boots" => [70, 124, 214, 255],
         "pink_boots" => [244, 120, 168, 255],

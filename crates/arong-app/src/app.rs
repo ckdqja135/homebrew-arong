@@ -432,6 +432,25 @@ fn clamp_origin(mtm: MainThreadMarker, origin: CGPoint, size: f64) -> CGPoint {
     clamp_rect(mtm, origin, size, size)
 }
 
+/// 산책용: 모니터가 여러 대면 맞닿은 경계를 걸쳐서 건너갈 수 있게 한다.
+/// 네 모서리와 가운데가 모두 어느 화면엔가 들어 있으면 그대로 두고, 화면 밖으로 나가는 경우에만 가장 가까운 화면 안으로 민다.
+/// (`clamp_origin`만 쓰면 한 화면 안에 통째로 들어가는 자리만 허용해서, 경계에서 막혀 옆 모니터로 넘어가지 못한다.)
+fn clamp_walk(mtm: MainThreadMarker, origin: CGPoint, size: f64) -> CGPoint {
+    let screens = NSScreen::screens(mtm);
+    let inside = |x: f64, y: f64| {
+        screens.iter().any(|screen| {
+            let v = screen.visibleFrame();
+            x >= v.origin.x && x <= v.origin.x + v.size.width && y >= v.origin.y && y <= v.origin.y + v.size.height
+        })
+    };
+    let (x, y) = (origin.x, origin.y);
+    let points = [(x, y), (x + size, y), (x, y + size), (x + size, y + size), (x + size / 2.0, y + size / 2.0)];
+    if points.into_iter().all(|(px, py)| inside(px, py)) {
+        return origin;
+    }
+    clamp_origin(mtm, origin, size)
+}
+
 /// SF Symbols 벡터 아이콘. 후보 중 이 macOS에 있는 첫 번째를 쓴다.
 fn symbol(names: &[&str], point: f64) -> Option<Retained<NSImage>> {
     let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(point, unsafe {
@@ -3719,7 +3738,7 @@ impl Controller {
             let before = walk.follower.pos;
             let wanted = walk.follower.step(&iv.walk_tuning, Vec2::new(cursor.x, cursor.y), dt);
             // 화면 경계·Dock·메뉴 막대 밖으로는 나가지 않는다. 막히면 그만큼 거리도 쌓이지 않는다.
-            let origin = clamp_origin(mtm, CGPoint::new(wanted.x - size / 2.0, wanted.y - size / 2.0), size);
+            let origin = clamp_walk(mtm, CGPoint::new(wanted.x - size / 2.0, wanted.y - size / 2.0), size);
             walk.follower.pos = Vec2::new(origin.x + size / 2.0, origin.y + size / 2.0);
             walk.meter.tick(&iv.walk_tuning, walk.follower.pos, dt);
             let moved = Vec2::new(walk.follower.pos.x - before.x, walk.follower.pos.y - before.y);
