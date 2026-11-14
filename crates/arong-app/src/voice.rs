@@ -6,14 +6,15 @@
 //!   평소에는 마이크를 열지 않는다(`Listener`가 살아 있는 동안만 듣는다).
 //! - 기기 안에서만 인식한다(`requiresOnDeviceRecognition`). 기기 안 인식을 지원하지 않는 Mac에서는 아예 쓰지 않는다.
 //!   그래서 소리가 외부 서버로 나가지 않는다.
-//! - 소리도, 인식된 문장도 저장하거나 기록하지 않는다. 다섯 가지 명령 중 어느 것인지만 밖으로 내보낸다.
+//! - 소리도, 인식된 문장도 저장하거나 기록하지 않는다. 다섯 가지 명령 중 어느 것인지, 또는 이름("아롱아")을
+//!   불렀는지만 밖으로 내보낸다.
 //! - 권한(마이크, 음성 인식)은 macOS가 사용자에게 직접 묻는다. 거부되면 듣지 않는다.
 
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-use arong_core::Command;
+use arong_core::{Command, Heard};
 use block2::RcBlock;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
@@ -24,8 +25,8 @@ use objc2_speech::{
     SFSpeechRecognizerAuthorizationStatus,
 };
 
-/// 인식 결과로 찾은 명령. 메인 스레드가 가져간다.
-static HEARD: Mutex<Option<Command>> = Mutex::new(None);
+/// 인식 결과로 찾은 명령(또는 이름 부르기). 메인 스레드가 가져간다.
+static HEARD: Mutex<Option<Heard>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -78,6 +79,21 @@ pub fn request_permission() {
     unsafe { SFSpeechRecognizer::requestAuthorization(&done) };
 }
 
+/// 지금 쓸 수 있는 마이크(입력 장치)가 있는지. 장치 구성만 묻고 마이크를 열지 않는다.
+/// 음성 인식 권한을 받은 뒤에만 부른다.
+pub fn has_input() -> bool {
+    if !bundle_declares_usage() || permission() != Permission::Allowed {
+        return false;
+    }
+    // 입력 장치가 없으면 AVFoundation이 예외를 던질 수 있어서 잡아서 "없음"으로 본다.
+    objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        let engine = AVAudioEngine::new();
+        let format = engine.inputNode().inputFormatForBus(0);
+        format.channelCount() > 0 && format.sampleRate() > 0.0
+    }))
+    .unwrap_or(false)
+}
+
 /// 듣는 동안에만 존재한다. 없어지면 마이크와 인식을 즉시 닫는다.
 pub struct Listener {
     engine: Retained<AVAudioEngine>,
@@ -108,7 +124,8 @@ impl Listener {
             let request = SFSpeechAudioBufferRecognitionRequest::new();
             request.setRequiresOnDeviceRecognition(true);
             request.setShouldReportPartialResults(true);
-            let words: Vec<Retained<NSString>> = Command::ALL.iter().map(|c| NSString::from_str(c.name())).collect();
+            let mut words: Vec<Retained<NSString>> = Command::ALL.iter().map(|c| NSString::from_str(c.name())).collect();
+            words.push(NSString::from_str("아롱아"));
             request.setContextualStrings(&NSArray::from_retained_slice(&words));
             request
         };
@@ -117,8 +134,8 @@ impl Listener {
             let Some(result) = (unsafe { result.as_ref() }) else { return };
             // 문장은 여기서 명령으로 바꾼 뒤 버린다(저장·기록하지 않는다).
             let text = unsafe { result.bestTranscription().formattedString() }.to_string();
-            if let (Some(command), Ok(mut heard)) = (Command::from_speech(&text), HEARD.lock()) {
-                *heard = Some(command);
+            if let (Some(found), Ok(mut heard)) = (Heard::from_speech(&text), HEARD.lock()) {
+                *heard = Some(found);
             }
         });
         // SAFETY: 블록은 선언된 인자 형식 그대로이고, 작업이 살아 있는 동안 프레임워크가 붙잡는다.
@@ -146,8 +163,8 @@ impl Listener {
         }
     }
 
-    /// 지금까지 알아들은 명령이 있으면 가져간다.
-    pub fn heard(&self) -> Option<Command> {
+    /// 지금까지 알아들은 것이 있으면 가져간다.
+    pub fn heard(&self) -> Option<Heard> {
         HEARD.lock().ok()?.take()
     }
 }

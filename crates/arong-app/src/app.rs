@@ -7,7 +7,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use arong_core::{ActionResult, Command, Follower, Pet, Purchase, Slot, Stage, Tuning, Vec2, WalkMeter, WalkTuning};
+use arong_core::{ActionResult, Command, Follower, Heard, Pet, Purchase, Slot, Stage, Tuning, Vec2, WalkMeter, WalkTuning};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
@@ -39,6 +39,8 @@ const WALK_HZ: f64 = 30.0;
 const DOORWAY_SECS: f64 = 1.1;
 /// 말로 훈련하는 동안, 마지막 명령 뒤로 이만큼(초) 아무 명령이 없으면 마이크를 닫는다.
 const VOICE_IDLE_SECS: f64 = 30.0;
+/// 이름을 부른 뒤 명령이 이어지는지 기다리는 시간(초).
+const NAME_WAIT_SECS: f64 = 0.9;
 /// 가장 깊이 들어갔을 때 줄어드는 정도와, 흐려지기 시작하는 진행도.
 const DOORWAY_SHRINK: f64 = 0.68;
 const DOORWAY_FADE_FROM: f64 = 0.55;
@@ -373,6 +375,8 @@ pub struct Ivars {
     listener: RefCell<Option<crate::voice::Listener>>,
     voice_timer: RefCell<Option<Retained<NSTimer>>>,
     voice_until: Cell<Option<Instant>>,
+    /// 말로 훈련 중 이름("아롱아")이 들린 시각. 명령이 이어지지 않으면 이름에 반응한다.
+    name_heard: Cell<Option<Instant>>,
     /// AI 사용량 집계: 사용자가 켰는지, 실제로 돌고 있는 루프백 수신기.
     ai_on: Cell<bool>,
     receiver: RefCell<Option<crate::otel::Receiver>>,
@@ -1286,11 +1290,26 @@ define_class!(
         fn voice_tick(&self, _t: &NSTimer) {
             let iv = self.ivars();
             let heard = iv.listener.borrow().as_ref().and_then(|l| l.heard());
-            if let Some(command) = heard {
-                // 알아들은 명령을 따르고, 다음 명령을 위해 새로 듣기 시작한다.
+            // 이름만 들렸으면 바로 반응하지 않고 잠깐 기다린다. "아롱아 앉아"처럼 명령이 이어질 수 있다.
+            let heard = match heard {
+                Some(Heard::Name) => {
+                    if iv.name_heard.get().is_none() {
+                        iv.name_heard.set(Some(Instant::now()));
+                    }
+                    None
+                }
+                other => other,
+            };
+            let called = heard.is_none() && iv.name_heard.get().is_some_and(|at| at.elapsed().as_secs_f64() >= NAME_WAIT_SECS);
+            if heard.is_some() || called {
+                // 알아들은 것을 따르고, 다음 말을 위해 새로 듣기 시작한다.
                 // (인식기는 지금까지 들은 문장을 계속 이어 붙이므로, 매번 새로 열어야 같은 말이 두 번 처리되지 않는다.)
                 iv.listener.replace(None);
-                self.do_command(command);
+                iv.name_heard.set(None);
+                match heard {
+                    Some(Heard::Command(command)) => self.do_command(command),
+                    _ => self.answer_name(),
+                }
                 match crate::voice::Listener::start() {
                     Ok(listener) => {
                         iv.listener.replace(Some(listener));
@@ -1644,6 +1663,7 @@ impl Controller {
             listener: RefCell::new(None),
             voice_timer: RefCell::new(None),
             voice_until: Cell::new(None),
+            name_heard: Cell::new(None),
             ai_on: Cell::new(ai_on),
             receiver: RefCell::new(None),
             rng: Cell::new(now_wall() as u64 | 1),
@@ -2785,7 +2805,17 @@ impl Controller {
             TileAction::Shop => self.open_shop_tiles(),
             TileAction::Training => self.open_training_tiles(),
             TileAction::Train(command) => {
-                self.do_command(command);
+                if self.voice_only() {
+                    // 마이크가 있으면 말로만 시킨다. 타일을 누르면 듣기를 시작하고 무슨 말을 하면 되는지 알려 준다.
+                    if self.ivars().listener.borrow().is_none() {
+                        self.start_listening();
+                    }
+                    if self.ivars().listener.borrow().is_some() {
+                        self.bubble(&format!("\"{}!\" 하고 말해 주세요", command.name()));
+                    }
+                } else {
+                    self.do_command(command);
+                }
                 self.open_training_tiles();
             }
             TileAction::Voice => {
@@ -2930,7 +2960,12 @@ impl Controller {
             active: false,
             action: TileAction::MainMenu,
         });
-        self.show_tiles(&format!("훈련 · Lv {level} · 친밀도 {affinity}"), "눌러서 시키기 · % 는 숙련도(높을수록 잘 따라 해요)", tiles);
+        let hint = if self.voice_only() {
+            "마이크 연결됨 · 말로 시키기 · \"아롱아\" 하고 불러도 봐요"
+        } else {
+            "눌러서 시키기 · % 는 숙련도(높을수록 잘 따라 해요)"
+        };
+        self.show_tiles(&format!("훈련 · Lv {level} · 친밀도 {affinity}"), hint, tiles);
     }
 
     /// 훈련 화면이 열려 있으면 숙련도와 "듣는 중" 표시를 새로 그린다.
@@ -2941,6 +2976,25 @@ impl Controller {
     }
 
     /// 명령 하나를 시킨다(타일로든 말로든 여기로 온다).
+    /// "아롱아" 하고 부르면 정면을 바라본다(훈련이 아니라서 보상은 없다).
+    fn answer_name(&self) {
+        let iv = self.ivars();
+        self.wake_from_house();
+        // 걷는 중이거나 앉아·엎드려 머무는 중이면 자세는 그대로 두고 대답만 한다.
+        let busy = iv.walk.borrow().is_some() || iv.doorway.borrow().is_some() || iv.held.get();
+        if !busy {
+            self.stop_roam();
+            self.perform(Act::Look);
+        }
+        self.bubble("멍! (불렀어요?)");
+    }
+
+    /// 훈련을 말로만 하는 상태인지: 음성 명령을 켰고, 권한이 있고, 마이크가 연결돼 있을 때.
+    fn voice_only(&self) -> bool {
+        let iv = self.ivars();
+        iv.voice_on.get() && (iv.listener.borrow().is_some() || crate::voice::has_input())
+    }
+
     fn do_command(&self, command: Command) {
         let iv = self.ivars();
         self.wake_from_house();
@@ -3026,7 +3080,7 @@ impl Controller {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(ns_string!("말로 훈련할까요? (마이크 사용)"));
         alert.setInformativeText(ns_string!(
-            "훈련 화면에서 '말로 훈련'을 누르면 마이크로 듣기 시작해서, 앉아·왼손·오른손·엎드려·일어서 중 어느 말인지 알아냅니다. 다시 누르거나 30초 동안 명령이 없으면 마이크를 닫습니다.\n\n· 평소에는 마이크를 열지 않습니다. '말로 훈련'을 켠 동안뿐입니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다.\n· 소리와 인식된 문장은 저장하지 않습니다. 다섯 명령 중 어느 것인지만 씁니다.\n\n계속하면 macOS가 '음성 인식'과 '마이크' 권한을 차례로 묻습니다. 더보기 메뉴에서 언제든 끌 수 있습니다."
+            "훈련 화면에서 '말로 훈련'을 누르면 마이크로 듣기 시작해서, 앉아·왼손·오른손·엎드려·일어서 중 어느 말인지, 또는 '아롱아' 하고 불렀는지 알아냅니다. 다시 누르거나 30초 동안 명령이 없으면 마이크를 닫습니다.\n\n· 평소에는 마이크를 열지 않습니다. '말로 훈련'을 켠 동안뿐입니다.\n· 소리는 이 Mac 안에서만 인식하고 외부로 보내지 않습니다.\n· 소리와 인식된 문장은 저장하지 않습니다. 다섯 명령 중 어느 것인지, 이름을 불렀는지만 씁니다.\n· 마이크가 연결돼 있는 동안에는 훈련을 말로만 시킵니다(타일을 누르면 듣기를 시작합니다).\n\n계속하면 macOS가 '음성 인식'과 '마이크' 권한을 차례로 묻습니다. 더보기 메뉴에서 언제든 끌 수 있습니다."
         ));
         alert.addButtonWithTitle(ns_string!("취소"));
         alert.addButtonWithTitle(ns_string!("켜기"));
@@ -3076,7 +3130,7 @@ impl Controller {
                 iv.voice_until.set(Some(Instant::now() + std::time::Duration::from_secs_f64(VOICE_IDLE_SECS)));
                 Self::stop(&iv.voice_timer);
                 iv.voice_timer.replace(Some(self.timer(0.15, sel!(voiceTick:), true, 0.05)));
-                self.bubble("말해 보세요: 앉아 / 왼손 / 오른손 / 엎드려 / 일어서 (끝내려면 다시 누르기)");
+                self.bubble("말해 보세요: 앉아 / 왼손 / 오른손 / 엎드려 / 일어서 / 아롱아 (끝내려면 다시 누르기)");
             }
             Err(reason) => self.bubble(reason),
         }
@@ -3087,6 +3141,7 @@ impl Controller {
         let iv = self.ivars();
         Self::stop(&iv.voice_timer);
         iv.voice_until.set(None);
+        iv.name_heard.set(None);
         iv.listener.replace(None);
     }
 
