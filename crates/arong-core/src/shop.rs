@@ -19,7 +19,7 @@ impl Slot {
     pub fn name(self) -> &'static str {
         match self {
             Slot::Hat => "모자",
-            Slot::Glasses => "안경",
+            Slot::Glasses => "얼굴 장식",
             Slot::Neck => "목 장식",
             Slot::Clothes => "옷",
             Slot::Shoes => "신발",
@@ -53,7 +53,7 @@ const fn def(id: &'static str, name: &'static str, price: i64, slot: Slot) -> It
     ItemDef { id, name, price, slot }
 }
 
-pub const ITEMS: [ItemDef; 73] = [
+pub const ITEMS: [ItemDef; 97] = [
     def("party", "파티 고깔", 60, Slot::Hat),
     def("beanie", "빨간 비니", 150, Slot::Hat),
     def("straw", "밀짚모자", 200, Slot::Hat),
@@ -65,12 +65,23 @@ pub const ITEMS: [ItemDef; 73] = [
     def("santa", "산타 모자", 260, Slot::Hat),
     def("chick", "병아리", 320, Slot::Hat),
     def("wizard", "마법사 모자", 400, Slot::Hat),
+    def("flower", "꽃 한 송이", 100, Slot::Hat),
+    def("beret", "베레모", 160, Slot::Hat),
+    def("bunny_ears", "토끼 귀", 200, Slot::Hat),
+    def("cowboy", "카우보이 모자", 240, Slot::Hat),
+    def("mortarboard", "학사모", 280, Slot::Hat),
+    def("pirate", "해적 모자", 300, Slot::Hat),
+    def("tophat", "실크햇", 360, Slot::Hat),
     def("round_glasses", "동글 안경", 120, Slot::Glasses),
     def("sunglasses", "선글라스", 180, Slot::Glasses),
     def("heart_glasses", "하트 안경", 250, Slot::Glasses),
     def("movie_glasses", "3D 안경", 150, Slot::Glasses),
     def("goggles", "고글", 220, Slot::Glasses),
     def("star_glasses", "별 안경", 280, Slot::Glasses),
+    def("blush", "볼터치", 90, Slot::Glasses),
+    def("mask", "마스크", 120, Slot::Glasses),
+    def("mustache", "콧수염", 160, Slot::Glasses),
+    def("eyepatch", "해적 안대", 200, Slot::Glasses),
     def("ribbon", "리본", 80, Slot::Neck),
     def("scarf", "목도리", 140, Slot::Neck),
     def("bowtie", "나비넥타이", 160, Slot::Neck),
@@ -83,6 +94,10 @@ pub const ITEMS: [ItemDef; 73] = [
     def("bib", "턱받이", 200, Slot::Neck),
     def("sailor", "세일러 카라", 260, Slot::Neck),
     def("capelet", "임금님 망토", 380, Slot::Neck),
+    def("green_scarf", "초록 목도리", 140, Slot::Neck),
+    def("blue_scarf", "파란 목도리", 140, Slot::Neck),
+    def("nametag", "이름표", 180, Slot::Neck),
+    def("heart_necklace", "하트 목걸이", 240, Slot::Neck),
     def("brown_wear", "갈색 옷", 200, Slot::Clothes),
     def("red_wear", "빨간 옷", 300, Slot::Clothes),
     def("blue_wear", "파란 옷", 300, Slot::Clothes),
@@ -127,6 +142,15 @@ pub const ITEMS: [ItemDef; 73] = [
     def("blue_boots", "파란 장화", 180, Slot::Shoes),
     def("pink_boots", "분홍 장화", 200, Slot::Shoes),
     def("purple_boots", "보라 장화", 200, Slot::Shoes),
+    def("red_sneakers", "빨강 스니커즈", 260, Slot::Shoes),
+    def("blue_sneakers", "파랑 스니커즈", 260, Slot::Shoes),
+    def("yellow_sneakers", "노랑 스니커즈", 260, Slot::Shoes),
+    def("pink_sneakers", "분홍 스니커즈", 260, Slot::Shoes),
+    def("mint_sneakers", "민트 스니커즈", 260, Slot::Shoes),
+    def("brown_sandals", "갈색 샌들", 220, Slot::Shoes),
+    def("red_sandals", "빨강 샌들", 220, Slot::Shoes),
+    def("blue_sandals", "파랑 샌들", 220, Slot::Shoes),
+    def("pink_sandals", "분홍 샌들", 220, Slot::Shoes),
 ];
 
 /// 집 단계 이름. 0은 집 없음.

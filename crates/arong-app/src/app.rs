@@ -265,7 +265,7 @@ fn item_icon(id: &str, stage: arong_core::Stage) -> TileIcon {
     }
     let color = crate::art::wear_color(id);
     if arong_core::shop::item(id).is_some_and(|def| def.slot == Slot::Shoes) {
-        return art_icon(color.map(crate::art::boot_icon), 2.5);
+        return art_icon(color.map(|c| crate::art::shoe_icon(c, crate::art::shoe_style(id))), 2.5);
     }
     art_icon(color.map(crate::art::swatch), 2.0)
 }
@@ -309,6 +309,8 @@ pub struct Ivars {
     atlas: RefCell<Option<Atlas>>,
     /// 표시 크기: 0 = 작게, 1 = 중간, 2 = 크게.
     size_level: Cell<u8>,
+    /// 보여 줄 모습: 0 = 지금 성장 단계 그대로, 1~3 = 아기·성장기·성견(이미 지나온 단계만).
+    look: Cell<u8>,
     always_on_top: Cell<bool>,
     locked: Cell<bool>,
     hidden: Cell<bool>,
@@ -391,9 +393,8 @@ pub struct Ivars {
     attention_until: Cell<Option<Instant>>,
     listener_since: Cell<Option<Instant>>,
     listen_failed: Cell<bool>,
-    /// AI 사용량 집계: 사용자가 켰는지, 실제로 돌고 있는 루프백 수신기.
+    /// AI 사용량 집계: 사용자가 켰는지(Claude Code 기록 파일에서 토큰 수만 읽는다).
     ai_on: Cell<bool>,
-    receiver: RefCell<Option<crate::otel::Receiver>>,
     rng: Cell<u64>,
 }
 
@@ -709,7 +710,6 @@ define_class!(
             self.flush_typing();
             self.ivars().keytap.replace(None);
             self.flush_ai();
-            self.ivars().receiver.replace(None);
             self.save();
         }
     }
@@ -1159,10 +1159,12 @@ define_class!(
             let iv = self.ivars();
             // 아직 반영되지 않은 수치도 함께 버린다.
             crate::keytap::take_count();
-            crate::otel::take_samples();
+            crate::usage::take_samples();
             if let Some(store) = &iv.store {
                 store.delete_activity();
             }
+            // 중복 판별 기록이 지워졌으니, 지금 이후의 사용량만 다시 센다.
+            self.restart_ai_from_now();
             self.with_pet(|p, _| {
                 p.day.keys = 0;
                 p.day.tokens = [0; 4];
@@ -1341,6 +1343,8 @@ define_class!(
                         iv.attention_until.set(attention);
                     }
                     Some(Heard::Command(command)) if attentive => self.do_command(command),
+                    // 시킨 대로 앉거나 엎드려 기다리는 중이면, 이름 없이 "일어나"만 해도 따른다.
+                    Some(Heard::Command(Command::StandUp)) if iv.held.get() => self.do_command(Command::StandUp),
                     Some(Heard::Command(_)) => {}
                     _ => {
                         self.answer_name();
@@ -1420,38 +1424,35 @@ define_class!(
         fn toggle_ai(&self, _s: Option<&AnyObject>) {
             let iv = self.ivars();
             if iv.ai_on.get() {
-                // 완전 해제: 남은 사용량을 반영하고 수신을 닫는다.
+                // 완전 해제: 남은 사용량을 반영하고 읽기를 멈춘다.
                 self.flush_ai();
                 iv.ai_on.set(false);
-                self.save_flag("ai", false);
+                self.save_flag("ai_logs", false);
                 self.sync_ai();
                 self.bubble("AI 사용량 집계 끔");
+                return;
+            }
+            if !crate::usage::available() {
+                self.bubble("Claude Code 기록 폴더가 없어요");
                 return;
             }
             let alert = NSAlert::new(self.mtm());
             alert.setMessageText(ns_string!("AI 사용량 집계를 켤까요? (Claude Code)"));
             alert.setInformativeText(ns_string!(
-                "Claude Code가 공식으로 내보내는 사용량 수치(토큰 수)를 이 Mac 안에서만 받아 경험치로 바꿉니다.\n\n· 받는 것: 입력·출력·캐시 토큰의 '개수'뿐입니다. 대화 내용, 코드, 로그인 정보는 받지도 읽지도 않습니다.\n· 함께 전송되는 계정 식별자는 저장하지 않고 버립니다.\n· 아롱이는 127.0.0.1(이 Mac)에서만 수신하고 외부로 아무것도 보내지 않습니다.\n· 펫을 키우려고 AI 요청을 따로 만들지 않습니다.\n\n켠 뒤 Claude Code 설정(~/.claude/settings.json)에 몇 줄을 직접 추가해야 합니다. '켜고 설정 복사'를 누르면 붙여 넣을 내용이 클립보드에 복사됩니다. 아롱이가 그 파일을 고치지는 않습니다."
+                "이 Mac의 Claude Code가 남기는 대화 기록 파일(~/.claude/projects 아래 .jsonl)을 읽어, 답변마다 적힌 토큰 수를 경험치로 바꿉니다. Claude Code 설정은 필요 없습니다.\n\n· 그 파일에는 대화 내용과 코드가 함께 들어 있습니다. 아롱이는 입력·출력·캐시 토큰의 '개수'와 시각만 꺼내 쓰고, 내용은 저장하지도 보여 주지도 않습니다.\n· 읽는 곳은 그 폴더뿐입니다. 로그인 정보나 다른 파일은 열지 않고, 파일을 고치지도 않습니다.\n· 외부로 아무것도 보내지 않습니다.\n· 펫을 키우려고 AI 요청을 따로 만들지 않습니다.\n· 지금부터 쓴 사용량만 셉니다.\n\n더보기 메뉴에서 언제든 끌 수 있고, 끄면 바로 읽기를 멈춥니다."
             ));
             alert.addButtonWithTitle(ns_string!("취소"));
-            alert.addButtonWithTitle(ns_string!("켜고 설정 복사"));
+            alert.addButtonWithTitle(ns_string!("켜기"));
             #[allow(deprecated)]
             NSApplication::sharedApplication(self.mtm()).activateIgnoringOtherApps(true);
             if alert.runModal() != 1001 {
                 return;
             }
             iv.ai_on.set(true);
-            self.save_flag("ai", true);
+            self.save_flag("ai_logs", true);
+            self.restart_ai_from_now();
             self.sync_ai();
-            self.do_copy_ai_config();
-            if iv.receiver.borrow().is_none() {
-                self.bubble("수신 포트를 열 수 없어요 (이미 사용 중)");
-            }
-        }
-
-        #[unsafe(method(copyAiConfig:))]
-        fn copy_ai_config(&self, _s: Option<&AnyObject>) {
-            self.do_copy_ai_config();
+            self.bubble("AI 사용량 집계 켬");
         }
 
         #[unsafe(method(toggleTypingPause:))]
@@ -1527,6 +1528,26 @@ define_class!(
         #[unsafe(method(sizeLarge:))]
         fn size_large(&self, _s: Option<&AnyObject>) {
             self.set_size_level(2);
+        }
+
+        #[unsafe(method(lookAuto:))]
+        fn look_auto(&self, _s: Option<&AnyObject>) {
+            self.set_look(0);
+        }
+
+        #[unsafe(method(lookBaby:))]
+        fn look_baby(&self, _s: Option<&AnyObject>) {
+            self.set_look(1);
+        }
+
+        #[unsafe(method(lookGrowing:))]
+        fn look_growing(&self, _s: Option<&AnyObject>) {
+            self.set_look(2);
+        }
+
+        #[unsafe(method(lookAdult:))]
+        fn look_adult(&self, _s: Option<&AnyObject>) {
+            self.set_look(3);
         }
 
         // 다른 프로세스가 보낸 "사진 찍어 줘" 알림. 아롱이 그림만 앱 데이터 폴더에 저장한다.
@@ -1606,6 +1627,7 @@ define_class!(
                 if let Some(store) = &iv.store {
                     store.delete_ai_series();
                 }
+                self.restart_ai_from_now();
                 self.save();
                 self.reload_atlas_if_needed();
                 self.apply_outfit();
@@ -1674,10 +1696,17 @@ impl Controller {
             .and_then(|v| v.parse::<u8>().ok())
             .filter(|v| *v <= 2)
             .unwrap_or(if flag("big", false) { 2 } else { 1 });
+        let look = store
+            .as_ref()
+            .and_then(|s| s.setting("look"))
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| *v <= 3)
+            .unwrap_or(0);
         // 기본값은 꺼짐. 사용자가 직접 켜야만 집계한다.
         let typing_on = flag("typing", false);
         let typing_paused = flag("typing_paused", false);
-        let ai_on = flag("ai", false);
+        // 예전 방식(설정을 넣어 숫자를 받던 것)의 동의는 이어받지 않는다. 기록 파일 읽기는 따로 동의받는다.
+        let ai_on = flag("ai_logs", false);
         // 음성 명령도 기본은 꺼짐이다.
         let voice_on = flag("voice", false);
         let voice_always = flag("voice_always", false);
@@ -1685,6 +1714,7 @@ impl Controller {
         let update_on = store.as_ref().and_then(|s| s.setting("update_check")).map(|v| v == "1");
         let ivars = Ivars {
             size_level: Cell::new(size_level),
+            look: Cell::new(look),
             always_on_top: Cell::new(flag("always_on_top", true)),
             locked: Cell::new(flag("locked", false)),
             hidden: Cell::new(flag("hidden", false)),
@@ -1758,7 +1788,6 @@ impl Controller {
             listener_since: Cell::new(None),
             listen_failed: Cell::new(false),
             ai_on: Cell::new(ai_on),
-            receiver: RefCell::new(None),
             rng: Cell::new(now_wall() as u64 | 1),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
@@ -1940,6 +1969,29 @@ impl Controller {
         CELL as f64 * self.scale()
     }
 
+    /// 화면에 그릴 모습의 단계. 고른 모습이 있으면 그것을, 없으면 지금 성장 단계를 쓴다.
+    /// 아직 자라지 않은 단계는 고를 수 없다(레벨·보상은 모습과 상관없이 실제 단계로 계산한다).
+    fn look_stage(&self) -> Stage {
+        let iv = self.ivars();
+        let grown = iv.pet.borrow().stage(&iv.tuning.borrow());
+        let chosen = match iv.look.get() {
+            1 => Stage::Baby,
+            2 => Stage::Growing,
+            3 => Stage::Adult,
+            _ => return grown,
+        };
+        if crate::art::stage_index(chosen) <= crate::art::stage_index(grown) { chosen } else { grown }
+    }
+
+    fn set_look(&self, look: u8) {
+        let iv = self.ivars();
+        iv.look.set(look);
+        if let Some(store) = &iv.store {
+            store.set_setting("look", &look.to_string());
+        }
+        self.reload_atlas_if_needed();
+    }
+
     fn apply_level(&self) {
         let iv = self.ivars();
         if let Some(panel) = iv.panel.get() {
@@ -2060,7 +2112,7 @@ impl Controller {
 
     fn reload_atlas_if_needed(&self) {
         let iv = self.ivars();
-        let stage = iv.pet.borrow().stage(&iv.tuning.borrow());
+        let stage = self.look_stage();
         let (shoes, clothes) = (self.shown(Slot::Shoes), self.shown(Slot::Clothes));
         if iv.atlas.borrow().as_ref().is_some_and(|a| a.stage == stage && a.shoes == shoes && a.clothes == clothes) {
             return;
@@ -2133,6 +2185,8 @@ impl Controller {
     fn perform(&self, act: Act) {
         let iv = self.ivars();
         let mut list: Vec<(Motion, usize)> = Vec::new();
+        // 성견의 `Sit` 그림은 다른 성견 그림보다 몸집이 작게 그려져 있어서, 성견은 앉는 동작에 `SitUp` 그림을 쓴다.
+        let sit = if self.look_stage() == Stage::Adult { Motion::SitUp } else { Motion::Sit };
         {
             let atlas = iv.atlas.borrow();
             let Some(a) = atlas.as_ref() else { return };
@@ -2144,7 +2198,7 @@ impl Controller {
             match act {
                 Act::Paw(left) => list.extend(all(if left { Motion::PawLeft } else { Motion::PawRight })),
                 Act::Sit | Act::SitUp | Act::Eat => {
-                    let m = if matches!(act, Act::SitUp) { Motion::SitUp } else { Motion::Sit };
+                    let m = if matches!(act, Act::SitUp) { Motion::SitUp } else { sit };
                     list.extend(down(m));
                     list.extend(pause(m, if matches!(act, Act::Eat) { 22 } else { 12 }));
                     list.extend(up(m));
@@ -2160,7 +2214,7 @@ impl Controller {
                     list.extend(up(Motion::LieDown));
                 }
                 Act::LieStay => list.extend(down(Motion::LieDown)),
-                Act::SitStay => list.extend(down(Motion::Sit)),
+                Act::SitStay => list.extend(down(sit)),
                 Act::Pant => {
                     for _ in 0..4 {
                         list.extend(all(Motion::Pant));
@@ -2365,6 +2419,18 @@ impl Controller {
         add("크기: 작게", Some(sel!(sizeSmall:)), level == 0);
         add("크기: 중간", Some(sel!(sizeMedium:)), level == 1);
         add("크기: 크게", Some(sel!(sizeLarge:)), level == 2);
+        // 모습 바꾸기: 지나온 단계가 있을 때만 보인다.
+        let grown = crate::art::stage_index(stage);
+        if grown > 0 {
+            // 저장된 선택이 아직 자라지 않은 단계면 고르지 않은 것으로 본다.
+            let look = if iv.look.get() as usize > grown + 1 { 0 } else { iv.look.get() };
+            add(&format!("모습: 자라는 대로 ({})", stage_name(stage)), Some(sel!(lookAuto:)), look == 0);
+            add("모습: 아기", Some(sel!(lookBaby:)), look == 1);
+            add("모습: 성장기", Some(sel!(lookGrowing:)), look == 2);
+            if grown >= 2 {
+                add("모습: 성견", Some(sel!(lookAdult:)), look == 3);
+            }
+        }
         add("숨기기", Some(sel!(toggleHidden:)), iv.hidden.get());
         add("일시정지 (대기 동작 끔)", Some(sel!(togglePause:)), iv.paused.get());
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -2395,7 +2461,6 @@ impl Controller {
                 None,
                 false,
             );
-            add("  Claude Code 설정 다시 복사", Some(sel!(copyAiConfig:)), false);
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         // SAFETY: 상태 조회만 한다.
@@ -2623,7 +2688,8 @@ impl Controller {
     }
 
     fn open_shop_tiles(&self) {
-        let (coins, worn, house_level, stage) = self.with_pet(|p, t| (p.coins, p.worn.clone(), p.house_level, p.stage(t)));
+        let (coins, worn, house_level) = self.with_pet(|p, _| (p.coins, p.worn.clone(), p.house_level));
+        let stage = self.look_stage();
         let mut tiles = Vec::new();
         for slot in Slot::ALL {
             // 옷은 옷 입은 그림이 있는 것만 판다. 하나도 없으면 칸을 내놓지 않는다(가진 옷과 저장 데이터는 그대로 둔다).
@@ -2670,7 +2736,7 @@ impl Controller {
 
     fn open_category_tiles(&self, slot: Slot) {
         let (coins, owned, worn, stage) =
-            self.with_pet(|p, t| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string), p.stage(t)));
+            self.with_pet(|p, _| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string), self.look_stage()));
         // 목록이 길면 스크롤해야 하므로, 돌아가기는 늘 보이는 맨 앞에 둔다.
         let mut tiles = Vec::new();
         tiles.push(TileSpec {
@@ -3389,52 +3455,50 @@ impl Controller {
         let iv = self.ivars();
         if !iv.ai_on.get() {
             "꺼짐"
-        } else if iv.receiver.borrow().is_none() {
-            "포트 사용 불가"
-        } else if now_wall() - crate::otel::last_received() < 600 {
+        } else if !crate::usage::available() {
+            "기록 폴더 없음"
+        } else if now_wall() - crate::usage::last_received() < 600 {
             "집계 중"
         } else {
-            "수신 대기"
+            "최근 사용 없음"
         }
     }
 
-    /// 수신 인증용 토큰. 처음 켤 때 한 번 만들어 설정에 둔다.
-    fn ai_token(&self) -> Option<String> {
-        let store = self.ivars().store.as_ref()?;
-        match store.setting("ai_token").filter(|t| t.len() == 32) {
-            Some(token) => Some(token),
-            None => {
-                let token = crate::otel::new_token()?;
-                store.set_setting("ai_token", &token);
-                Some(token)
-            }
+    fn ai_setting(&self, key: &str) -> i64 {
+        let store = self.ivars().store.as_ref();
+        store.and_then(|s| s.setting(key)).and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// 지금 이전의 사용량은 세지 않도록 기준 시각을 다시 잡는다(처음 켤 때, 집계 기록을 지울 때).
+    fn restart_ai_from_now(&self) {
+        crate::usage::reset();
+        if let Some(store) = &self.ivars().store {
+            let now = now_wall().to_string();
+            store.set_setting("ai_since", &now);
+            store.set_setting("ai_seen", &now);
         }
     }
 
-    /// Claude Code 설정에 붙여 넣을 내용을 클립보드에 복사한다. 설정 파일을 직접 고치지는 않는다.
-    fn do_copy_ai_config(&self) {
-        let Some(token) = self.ai_token() else { return };
-        let text = format!(
-            "\"env\": {{\n  \"CLAUDE_CODE_ENABLE_TELEMETRY\": \"1\",\n  \"OTEL_METRICS_EXPORTER\": \"otlp\",\n  \"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL\": \"http/json\",\n  \"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT\": \"http://127.0.0.1:{}/v1/metrics\",\n  \"OTEL_EXPORTER_OTLP_METRICS_HEADERS\": \"Authorization=Bearer {token}\",\n  \"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE\": \"cumulative\"\n}}",
-            crate::otel::DEFAULT_PORT
-        );
-        // 클립보드에 쓰기만 한다(읽지 않는다).
-        let board = NSPasteboard::generalPasteboard();
-        board.clearContents();
-        board.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
-        self.bubble("Claude Code 설정을 복사했어요");
+    /// 새로 늘어난 기록을 읽기 시작한다. 결과는 다음 `flush_ai` 때 반영된다.
+    fn scan_ai(&self) {
+        if !self.ivars().ai_on.get() {
+            return;
+        }
+        let since = self.ai_setting("ai_since");
+        if since <= 0 {
+            return;
+        }
+        // 앱이 꺼져 있던 동안 바뀐 파일도 한 번 훑는다(여유 1분).
+        crate::usage::scan_async(since, self.ai_setting("ai_seen").max(since) - 60);
     }
 
     fn sync_ai(&self) {
         let iv = self.ivars();
-        let running = iv.receiver.borrow().is_some();
-        if iv.ai_on.get() && !running {
-            let receiver = self.ai_token().and_then(|t| crate::otel::Receiver::start(crate::otel::DEFAULT_PORT, t));
-            iv.receiver.replace(receiver);
-        } else if !iv.ai_on.get() && running {
-            // 끄면 수신 소켓을 즉시 닫고 대기 중인 표본도 버린다.
-            iv.receiver.replace(None);
-            crate::otel::take_samples();
+        if iv.ai_on.get() {
+            self.scan_ai();
+        } else {
+            // 끄면 읽은 위치와 대기 중인 표본을 버린다.
+            crate::usage::reset();
         }
         self.sync_typing();
     }
@@ -3442,14 +3506,20 @@ impl Controller {
     /// 받은 사용량을 경험치로 반영한다. 증가분 계산과 저장은 한 트랜잭션이다.
     fn flush_ai(&self) {
         let iv = self.ivars();
-        if iv.receiver.borrow().is_none() {
-            return;
-        }
-        let samples = crate::otel::take_samples();
-        if samples.is_empty() {
+        if !iv.ai_on.get() {
             return;
         }
         let Some(store) = &iv.store else { return };
+        // 어디까지 훑었는지 남겨 두면 다시 켰을 때 그 뒤에 바뀐 파일만 연다.
+        let scanned = crate::usage::last_scan();
+        if scanned > self.ai_setting("ai_seen") {
+            store.set_setting("ai_seen", &scanned.to_string());
+        }
+        let samples = crate::usage::take_samples();
+        self.scan_ai();
+        if samples.is_empty() {
+            return;
+        }
         let before = iv.pet.borrow().level();
         let ok = store.commit_ai(&samples, now_wall(), |deltas| {
             self.with_pet(|p, t| {
@@ -3532,7 +3602,7 @@ impl Controller {
     fn refresh_accessories(&self) {
         let iv = self.ivars();
         let Some(layers) = iv.acc_layers.get() else { return };
-        let stage = crate::art::stage_index(iv.pet.borrow().stage(&iv.tuning.borrow()));
+        let stage = crate::art::stage_index(self.look_stage());
         let worn = ACC_SLOTS.map(|slot| self.shown(slot));
         let mut shapes = [None; 3];
         CATransaction::begin();
@@ -4033,8 +4103,7 @@ impl Controller {
         // 목줄: 목 → 커서. 여유 길이만큼 아래로 처지는 2차 곡선 하나.
         // 목줄은 지금 프레임의 목 위치(머리 기준점 + 단계별 목 오프셋)에 붙는다.
         let (cx, cy) = {
-            let pet = iv.pet.borrow();
-            let stage = crate::art::stage_index(pet.stage(&iv.tuning.borrow()));
+            let stage = crate::art::stage_index(self.look_stage());
             let atlas = iv.atlas.borrow();
             let frame = atlas.as_ref().map(|a| a.frame(iv.motion.get(), iv.frame.get()));
             let (ax, ay) = frame.map_or((CELL as f64 / 2.0, CELL as f64 / 4.0), |f| f.head);

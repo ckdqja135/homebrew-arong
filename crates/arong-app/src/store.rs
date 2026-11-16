@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use arong_core::{Command, DayCounters, MAX_HOUSE_LEVEL, Pet, Slot, shop};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::otel::Sample;
+use crate::usage::Sample;
 
 const SCHEMA_VERSION: i64 = 7;
 const DB_NAME: &str = "arong.sqlite";
@@ -92,7 +92,7 @@ fn migrate(conn: &Connection, from: i64) -> rusqlite::Result<()> {
     }
     if from < 4 {
         // AI 사용량: 오늘의 종류별 합계와, 중복 보상을 막기 위한 시계열별 마지막 값만 둔다.
-        // ai_series.key는 속성 조합의 해시라 세션 ID·계정 정보 원문은 저장되지 않는다.
+        // ai_series.key는 해시라 메시지 ID·세션 ID·계정 정보 원문은 저장되지 않는다.
         conn.execute_batch(
             "BEGIN;
              ALTER TABLE pet ADD COLUMN day_tok_in INTEGER NOT NULL DEFAULT 0;
@@ -334,7 +334,7 @@ impl Store {
     }
 
     /// 사용량 표본을 "아직 보상하지 않은 증가분"으로 바꾸고, 그 보상이 반영된 펫 상태와
-    /// 시계열별 마지막 값을 한 트랜잭션으로 저장한다. 그래서 재시작·재전송·중복 수신이 있어도
+    /// 시계열별 마지막 값을 한 트랜잭션으로 저장한다. 그래서 재시작이나 같은 메시지의 반복이 있어도
     /// 같은 토큰이 두 번 보상되지 않는다. `apply`는 증가분을 받아 보상을 반영한 펫을 돌려준다.
     pub fn commit_ai(&self, samples: &[Sample], now: i64, apply: impl FnOnce([u64; 4]) -> Pet) -> bool {
         let run = || -> rusqlite::Result<()> {
@@ -347,24 +347,20 @@ impl Store {
                     })
                     .optional()?
                     .unwrap_or((0, 0));
-                // 이미 본 시각이거나 더 오래된 보고는 재전송으로 보고 버린다.
+                // 이미 반영한 읽기이거나 더 오래된 것은 버린다.
                 if s.time <= last_time {
                     continue;
                 }
                 let value = s.value.min(i64::MAX as u64) as i64;
-                let (delta, new_value) = if s.cumulative {
-                    // 누적값: 지난번보다 늘어난 만큼만. 줄어들었으면 보상 없이 기준만 낮춘다.
-                    ((value - last_value).max(0), value)
-                } else {
-                    (value, last_value)
-                };
+                // 메시지별 누적값: 지난번보다 늘어난 만큼만. 더 작은 값(중간 줄의 복사본)은 무시한다.
+                let (delta, new_value) = ((value - last_value).max(0), value.max(last_value));
                 tx.execute(
                     "INSERT OR REPLACE INTO ai_series (key, last_value, last_time, updated) VALUES (?1, ?2, ?3, ?4)",
                     params![s.key, new_value, s.time, now],
                 )?;
                 deltas[s.kind] = deltas[s.kind].saturating_add(delta as u64);
             }
-            // 끝난 세션의 기록은 일주일 뒤 지운다.
+            // 중복 판별 기록은 일주일 뒤 지운다(그보다 오래된 줄은 읽을 때 걸러진다).
             tx.execute("DELETE FROM ai_series WHERE updated < ?1", params![now - 7 * 86_400])?;
             let pet = apply(deltas);
             Self::write_pet(&tx, &pet)?;

@@ -290,8 +290,8 @@ fn build(
         };
         pixels = art;
     }
-    if let Some(color) = shoes.and_then(art::wear_color) {
-        art::paint_shoes(&mut pixels, CELL, color);
+    if let Some((color, style)) = shoes.and_then(|id| Some((art::wear_color(id)?, art::shoe_style(id)))) {
+        art::paint_shoes(&mut pixels, CELL, color, style);
         source = pixels.cg_image()?;
     }
     // 가로 가운데와 발이 닿는 줄을 기준으로 놓는다(걷기만 비율이 다르다).

@@ -254,6 +254,16 @@ pub fn accessory_art(id: &str) -> Option<Accessory> {
     let glasses = |rows: &[&str], palette: &[(char, Rgba)]| {
         Some(Accessory { art: Art::from_ascii(rows, palette, false).scaled(ACC_SCALE), offset: GLASSES_OFFSET, side_offset: GLASSES_SIDE_OFFSET, front_offset: GLASSES_FRONT_OFFSET })
     };
+    // 얼굴 장식(마스크·수염 등): 안경 자리에서 `drop`px 아래에 붙인다.
+    let face = |rows: &[&str], palette: &[(char, Rgba)], drop: i32, outline: bool| {
+        let down = |offsets: [(i32, i32); 3]| offsets.map(|(dx, dy)| (dx, dy + drop));
+        Some(Accessory {
+            art: Art::from_ascii(rows, palette, outline).scaled(ACC_SCALE),
+            offset: down(GLASSES_OFFSET),
+            side_offset: down(GLASSES_SIDE_OFFSET),
+            front_offset: down(GLASSES_FRONT_OFFSET),
+        })
+    };
     let neck = |rows: &[&str], palette: &[(char, Rgba)]| {
         Some(Accessory { art: Art::from_ascii(rows, palette, true).scaled(ACC_SCALE), offset: NECK_OFFSET, side_offset: NECK_SIDE_OFFSET, front_offset: NECK_FRONT_OFFSET })
     };
@@ -600,6 +610,191 @@ pub fn accessory_art(id: &str) -> Option<Accessory> {
             ],
             &[('r', R), ('R', RL), ('y', Y), ('w', W), ('n', NAVY)],
         ),
+        "beret" => hat(
+            &[
+                "......nn......",
+                "....rrrrrr....",
+                "..rrrrrrrrrr..",
+                ".rrRRrrrrrrrr.",
+                "rrRrrrrrrrrrrr",
+                "rrrrrrrrrrrrrr",
+                ".rrrrrrrrrrrr.",
+                "...dddddddd...",
+            ],
+            &[('r', R), ('R', RL), ('d', [150, 40, 44, 255]), ('n', [150, 40, 44, 255])],
+            4,
+        ),
+        "cowboy" => hat(
+            &[
+                "......bbbbbb......",
+                ".....bbBbbbbb.....",
+                ".....bBbbbbbb.....",
+                ".....dddddddd.....",
+                "b....bbbbbbbb....b",
+                "bbbbbbbbbbbbbbbbbb",
+                ".bbbbbbbbbbbbbbbb.",
+                "...dddddddddddd...",
+            ],
+            &[('b', [176, 116, 62, 255]), ('B', [214, 160, 96, 255]), ('d', [120, 74, 40, 255])],
+            4,
+        ),
+        "flower" => hat(
+            &[
+                "..pp.pp..",
+                ".pppPppp.",
+                ".ppyyypp.",
+                "..pyyyp..",
+                ".ppyyypp.",
+                ".ppppppp.",
+                "..pp.pp..",
+                "....g....",
+                "...gg....",
+            ],
+            &[('p', PINK), ('P', PINKL), ('y', Y), ('g', GR)],
+            2,
+        ),
+        "mortarboard" => hat(
+            &[
+                ".......nn.......",
+                ".....nnnnnn.....",
+                "...nnnNnnnnnn...",
+                ".nnnnnnnnnnnnnn.",
+                "...nnnnnnnnnny..",
+                "....mmmmmmmm.y..",
+                "....mmmmmmmm.y..",
+                "....mmmmmmmm.yy.",
+            ],
+            &[('n', [58, 66, 100, 255]), ('N', [110, 120, 160, 255]), ('m', NAVY), ('y', Y)],
+            3,
+        ),
+        "pirate" => hat(
+            &[
+                ".....nnnnnn.....",
+                "...nnnnnnnnnn...",
+                "..nnnwnnnnwnnn..",
+                ".nnnnnwwwwnnnnn.",
+                "nnnnnnwnnwnnnnnn",
+                "nnnnnnnwwnnnnnnn",
+                "yyyyyyyyyyyyyyyy",
+            ],
+            &[('n', [58, 62, 84, 255]), ('w', W), ('y', Y)],
+            4,
+        ),
+        "bunny_ears" => hat(
+            &[
+                ".ww......ww.",
+                "wwww....wwww",
+                "wppw....wppw",
+                "wppw....wppw",
+                "wppw....wppw",
+                "wppw....wppw",
+                ".wpw....wpw.",
+                ".www....www.",
+                "pppppppppppp",
+            ],
+            &[('w', W), ('p', PINKL)],
+            2,
+        ),
+        "tophat" => hat(
+            &[
+                "...nnnnnnnn...",
+                "...nnNnnnnn...",
+                "...nnNnnnnn...",
+                "...nnnnnnnn...",
+                "...nnnnnnnn...",
+                "...rrrrrrrr...",
+                "...rrrrrrrr...",
+                "nnnnnnnnnnnnnn",
+                "mmmmmmmmmmmmmm",
+            ],
+            &[('n', [66, 70, 92, 255]), ('N', [130, 136, 164, 255]), ('m', NAVY), ('r', R)],
+            3,
+        ),
+        "mask" => face(
+            &[
+                "g.........g",
+                ".gwwwwwwwg.",
+                "..wwgwgww..",
+                "..wwwwwww..",
+                "...wwwww...",
+            ],
+            &[('w', W), ('g', G)],
+            12,
+            true,
+        ),
+        "eyepatch" => face(
+            &[
+                "sssssssssss",
+                "nnnnn......",
+                "nNnnn......",
+                ".nnn.......",
+            ],
+            &[('n', [74, 80, 110, 255]), ('N', [124, 132, 166, 255]), ('s', [132, 138, 160, 255])],
+            -1,
+            false,
+        ),
+        "mustache" => face(
+            &[
+                ".bb...bb.",
+                "bbbbbbbbb",
+                "bb.bbb.bb",
+            ],
+            &[('b', [226, 178, 116, 255])],
+            10,
+            true,
+        ),
+        "blush" => face(
+            &[
+                ".pp.......pp.",
+                "pppp.....pppp",
+                ".pp.......pp.",
+            ],
+            &[('p', PINK)],
+            9,
+            true,
+        ),
+        "heart_necklace" => neck(
+            &[
+                "y.........y",
+                ".y.......y.",
+                "..yrr.rry..",
+                "...rrRrr...",
+                "....rrr....",
+                ".....r.....",
+            ],
+            &[('y', Y), ('r', R), ('R', RL)],
+        ),
+        "nametag" => neck(
+            &[
+                "cccccccccc",
+                "cdcdcdcdcd",
+                "...yyyy...",
+                "..yynnyy..",
+                "..yyyyyy..",
+                "...yyyy...",
+            ],
+            &[('c', C), ('d', CD), ('y', Y), ('n', YD)],
+        ),
+        "green_scarf" => neck(
+            &[
+                "ggwggwggwggwgg",
+                "gwggwggwggwggw",
+                ".........ggw..",
+                ".........gwg..",
+                ".........w.w..",
+            ],
+            &[('g', GR), ('w', W)],
+        ),
+        "blue_scarf" => neck(
+            &[
+                "ccwccwccwccwcc",
+                "cwccwccwccwccw",
+                ".........ccw..",
+                ".........cwc..",
+                ".........w.w..",
+            ],
+            &[('c', C), ('w', W)],
+        ),
         _ => None,
     }
 }
@@ -726,6 +921,15 @@ pub fn wear_color(id: &str) -> Option<Rgba> {
         "blue_boots" => [70, 124, 214, 255],
         "pink_boots" => [244, 120, 168, 255],
         "purple_boots" => [142, 98, 214, 255],
+        "red_sneakers" => [222, 62, 62, 255],
+        "blue_sneakers" => [70, 124, 214, 255],
+        "yellow_sneakers" => [246, 200, 52, 255],
+        "pink_sneakers" => [244, 120, 168, 255],
+        "mint_sneakers" => [84, 204, 168, 255],
+        "brown_sandals" => [150, 96, 60, 255],
+        "red_sandals" => [222, 62, 62, 255],
+        "blue_sandals" => [70, 124, 214, 255],
+        "pink_sandals" => [244, 120, 168, 255],
         _ => return None,
     })
 }
@@ -773,7 +977,7 @@ const SOLE: Rgba = [58, 46, 48, 255];
 /// 그림을 따로 얹지 않고 원본 다리 모양을 따라가므로 걷는 동작과 어긋나지 않는다.
 /// 발 모양 그대로 칠하면 "발을 색칠한" 것처럼 보이므로, 장화답게 목 높이를 일자로 맞추고
 /// 접힌 목단·광택·평평한 밑창을 넣는다. 공중에 든 발은 찾지 못해 신기지 않는다.
-pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
+pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba, style: ShoeStyle) {
     for row in 0..atlas.h / cell {
         for col in 0..atlas.w / cell {
             let (ox, oy) = ((col * cell) as i32, (row * cell) as i32);
@@ -839,8 +1043,13 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
                     }
                 }
 
-                // 작은 발에는 낮은 장화를 신긴다.
-                let height = ((end - start) * 3 / 4).clamp(7, BOOT_H);
+                // 작은 발에는 낮은 신발을 신긴다. 장화가 가장 높고, 스니커즈·샌들은 발목 아래까지만 온다.
+                let width = end - start;
+                let height = match style {
+                    ShoeStyle::Boot => (width * 3 / 4).clamp(7, BOOT_H),
+                    ShoeStyle::Sneaker => (width * 3 / 5).clamp(6, 8),
+                    ShoeStyle::Sandal => (width / 2).clamp(5, 7),
+                };
                 let top = sole - height + 1;
                 for fx in start..end {
                     let bottom = lowest[fx as usize].unwrap_or(sole).min(sole);
@@ -854,20 +1063,57 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
                         if !inside && y <= bottom {
                             continue;
                         }
-                        let c = if y >= sole {
-                            SOLE
-                        } else if y == top {
-                            shade(color, 1.35)
-                        } else if y == top + 1 {
-                            shade(color, 1.15)
-                        } else if y == top + 2 {
-                            shade(color, 0.7)
-                        } else if fx == start || fx == end - 1 {
-                            shade(color, 0.55)
-                        } else if (fx == start + 2 || fx == start + 3) && (y == sole - 3 || y == sole - 4) {
-                            shade(color, 1.4)
-                        } else {
-                            color
+                        // 그림은 왼쪽을 보므로 발끝은 왼쪽(`start` 쪽)이다.
+                        let c = match style {
+                            ShoeStyle::Boot => {
+                                if y >= sole {
+                                    SOLE
+                                } else if y == top {
+                                    shade(color, 1.35)
+                                } else if y == top + 1 {
+                                    shade(color, 1.15)
+                                } else if y == top + 2 {
+                                    shade(color, 0.7)
+                                } else if fx == start || fx == end - 1 {
+                                    shade(color, 0.55)
+                                } else if (fx == start + 2 || fx == start + 3) && (y == sole - 3 || y == sole - 4) {
+                                    shade(color, 1.4)
+                                } else {
+                                    color
+                                }
+                            }
+                            // 스니커즈: 두꺼운 흰 밑창, 흰 앞코, 흰 끈.
+                            ShoeStyle::Sneaker => {
+                                if y == sole {
+                                    [196, 196, 200, 255]
+                                } else if y == sole - 1 {
+                                    SNEAKER_WHITE
+                                } else if fx < start + 3 && y >= top + 2 {
+                                    SNEAKER_WHITE
+                                } else if y == top {
+                                    shade(color, 0.65)
+                                } else if (fx == start + 4 || fx == start + 6) && (y == top + 1 || y == top + 2) {
+                                    SNEAKER_WHITE
+                                } else if fx == end - 1 {
+                                    shade(color, 0.6)
+                                } else {
+                                    color
+                                }
+                            }
+                            // 샌들: 밑창과 끈 두 줄만 그리고, 그 사이로 발이 보인다.
+                            ShoeStyle::Sandal => {
+                                if y == sole {
+                                    shade(SANDAL_SOLE, 0.6)
+                                } else if y == sole - 1 {
+                                    SANDAL_SOLE
+                                } else if y == top || y == top + 1 {
+                                    if y == top { shade(color, 1.2) } else { shade(color, 0.8) }
+                                } else if fx == start + 2 || fx == start + 3 {
+                                    if fx == start + 2 { color } else { shade(color, 0.75) }
+                                } else {
+                                    continue;
+                                }
+                            }
                         };
                         atlas.set(ox + fx, oy + y, c);
                     }
@@ -877,8 +1123,63 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba) {
     }
 }
 
+/// 신발의 모양.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShoeStyle {
+    Boot,
+    Sneaker,
+    Sandal,
+}
+
+const SNEAKER_WHITE: Rgba = [244, 244, 240, 255];
+const SANDAL_SOLE: Rgba = [176, 124, 76, 255];
+
+/// 아이템 id로 신발 모양을 정한다.
+pub fn shoe_style(id: &str) -> ShoeStyle {
+    if id.ends_with("_sneakers") {
+        ShoeStyle::Sneaker
+    } else if id.ends_with("_sandals") {
+        ShoeStyle::Sandal
+    } else {
+        ShoeStyle::Boot
+    }
+}
+
+/// 상점에 보여 줄 신발 그림.
+pub fn shoe_icon(color: Rgba, style: ShoeStyle) -> Art {
+    match style {
+        ShoeStyle::Boot => boot_icon(color),
+        ShoeStyle::Sneaker => Art::from_ascii(
+            &[
+                ".......ddddd",
+                "......cwcwcc",
+                "....cccwcwcc",
+                ".wwwccccccce",
+                "wwwwccccccce",
+                "WWWWWWWWWWWW",
+                "gggggggggggg",
+            ],
+            &[('c', color), ('d', shade(color, 0.65)), ('e', shade(color, 0.6)), ('w', SNEAKER_WHITE), ('W', SNEAKER_WHITE), ('g', [196, 196, 200, 255])],
+            true,
+        ),
+        ShoeStyle::Sandal => Art::from_ascii(
+            &[
+                ".........LLL",
+                ".........ddd",
+                "...cd....c.d",
+                "..cd.....c.d",
+                ".cd......c.d",
+                "ssssssssssss",
+                "tttttttttttt",
+            ],
+            &[('c', color), ('d', shade(color, 0.75)), ('L', shade(color, 1.2)), ('s', SANDAL_SOLE), ('t', shade(SANDAL_SOLE, 0.6))],
+            true,
+        ),
+    }
+}
+
 /// 상점에 보여 줄 장화 그림.
-pub fn boot_icon(color: Rgba) -> Art {
+fn boot_icon(color: Rgba) -> Art {
     Art::from_ascii(
         &[
             "...LLLLL....",

@@ -2,10 +2,10 @@ mod app;
 mod art;
 mod backup;
 mod keytap;
-mod otel;
 mod sprites;
 mod store;
 mod update;
+mod usage;
 mod voice;
 
 use objc2::MainThreadMarker;
