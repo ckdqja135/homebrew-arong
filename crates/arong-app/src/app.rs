@@ -379,6 +379,11 @@ pub struct Ivars {
     /// 새 버전 확인: 사용자가 켰는지(None = 아직 물어보지 않음), 주기 타이머, 찾은 새 버전.
     update_on: Cell<Option<bool>>,
     update_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// 마지막으로 확인에 성공한 시각·시도한 시각·새 버전을 알린 시각(unix 초)과 연속 실패 횟수.
+    update_checked: Cell<i64>,
+    update_tried: Cell<i64>,
+    update_told: Cell<i64>,
+    update_fails: Cell<u8>,
     new_version: RefCell<Option<String>>,
     /// 음성 명령: 사용자가 켰는지, 지금 듣고 있는 중이면 그 리스너와 타이머, 듣기를 끝낼 시각.
     voice_on: Cell<bool>,
@@ -389,6 +394,8 @@ pub struct Ivars {
     name_heard: Cell<Option<Instant>>,
     /// 항상 듣기: 사용자가 따로 동의하고 켠 설정. 켜져 있으면 앱이 도는 동안 마이크를 열어 이름을 기다린다.
     voice_always: Cell<bool>,
+    /// 인식 작업이 열자마자 끝나 버린 연속 횟수.
+    listen_errors: Cell<u32>,
     /// 이름을 부른 뒤 귀 기울이는 시간의 끝, 지금 듣는 인식을 연 시각, 항상 듣기 실패를 이미 알렸는지.
     attention_until: Cell<Option<Instant>>,
     listener_since: Cell<Option<Instant>>,
@@ -397,6 +404,10 @@ pub struct Ivars {
     ai_on: Cell<bool>,
     rng: Cell<u64>,
 }
+
+/// 새 버전 확인 간격과, 새 버전이 있을 때 다시 알리는 간격.
+const UPDATE_EVERY_SECS: i64 = 20 * 3600;
+const UPDATE_REMIND_SECS: i64 = 3 * 3600;
 
 fn now_wall() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -1258,26 +1269,35 @@ define_class!(
 
         #[unsafe(method(updateTick:))]
         fn update_tick(&self, _t: &NSTimer) {
-            if self.ivars().update_on.get() == Some(true) {
+            let iv = self.ivars();
+            if iv.update_on.get() != Some(true) {
+                return;
+            }
+            self.take_update_result();
+            let now = now_wall();
+            // 벽시계로 따진다(잠자기 중에는 타이머가 멈추므로). 성공한 뒤로는 하루에 한 번쯤,
+            // 실패했으면(켜자마자 네트워크가 아직 없을 때 등) 몇 분 뒤 다시 해 본다.
+            let due = if iv.update_checked.get() > 0 {
+                now - iv.update_checked.get() >= UPDATE_EVERY_SECS
+            } else {
+                now - iv.update_tried.get() >= if iv.update_fails.get() < 3 { 240 } else { 1800 }
+            };
+            if due {
+                iv.update_tried.set(now);
+                iv.update_fails.set(iv.update_fails.get().saturating_add(1));
                 crate::update::check();
-                // 응답은 백그라운드에서 오므로 조금 뒤에 결과를 본다.
-                std::mem::forget(self.timer(20.0, sel!(updateResult:), false, 5.0));
+                // 응답은 백그라운드에서 오므로 조금씩 간격을 두고 결과를 본다.
+                for wait in [3.0, 8.0, 20.0] {
+                    std::mem::forget(self.timer(wait, sel!(updateResult:), false, 1.0));
+                }
+            } else if iv.new_version.borrow().is_some() && now - iv.update_told.get() >= UPDATE_REMIND_SECS {
+                self.announce_update();
             }
         }
 
         #[unsafe(method(updateResult:))]
         fn update_result(&self, _t: &NSTimer) {
-            let iv = self.ivars();
-            let Some(latest) = crate::update::take_latest() else { return };
-            if iv.update_on.get() == Some(true) && crate::update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
-                // 아롱이가 정면을 보며 직접 알려 준다(하루 한 번 확인할 때마다).
-                if iv.walk.borrow().is_none() && iv.doorway.borrow().is_none() {
-                    self.stop_roam();
-                    self.perform(Act::Look);
-                }
-                self.bubble(&format!("멍! 새 버전 {latest}이 나왔다멍! 더보기 메뉴에서 업데이트 해달라 멍!"));
-                iv.new_version.replace(Some(latest));
-            }
+            self.take_update_result();
         }
 
         #[unsafe(method(copyUpdateCommand:))]
@@ -1333,6 +1353,7 @@ define_class!(
                 // (인식기는 지금까지 들은 문장을 계속 이어 붙이므로, 매번 새로 열어야 같은 말이 두 번 처리되지 않는다.)
                 iv.listener.replace(None);
                 iv.name_heard.set(None);
+                iv.listen_errors.set(0);
                 // 말로 훈련 중이거나, 방금 이름을 불러 아롱이가 귀 기울이는 동안에만 이름 없는 명령을 따른다.
                 // (항상 듣기 중에 지나가는 말 속의 "앉아", "오른쪽"에 반응하지 않게.)
                 let attentive = session || iv.attention_until.get().is_some_and(|until| now < until);
@@ -1366,6 +1387,25 @@ define_class!(
                     self.bubble("말로 훈련 끝 (마이크를 닫았어요)");
                 }
                 self.refresh_training_tiles();
+            } else if iv.listener.borrow().as_ref().is_some_and(|l| l.ended())
+                && iv.name_heard.get().is_none()
+                && iv.listener_since.get().is_none_or(|since| {
+                    // 인식 작업은 한동안 조용하거나 오류가 나면 끝나 버리고, 끝난 뒤에는 아무것도 듣지 못한다.
+                    // 바로 새로 연다. 계속 곧바로 끝나면(인식을 쓸 수 없는 상태) 간격을 벌린다.
+                    let wait = if iv.listen_errors.get() < 5 { 1.0 } else { 15.0 };
+                    since.elapsed().as_secs_f64() >= wait
+                })
+            {
+                let quick = iv.listener_since.get().is_some_and(|since| since.elapsed().as_secs_f64() < 5.0);
+                iv.listen_errors.set(if quick { iv.listen_errors.get().saturating_add(1) } else { 0 });
+                if iv.listen_errors.get() == 5 {
+                    if let Some((domain, code)) = crate::voice::last_error() {
+                        // 진단용: 오류의 종류와 번호만 남긴다.
+                        eprintln!("voice: recognition keeps ending: {domain} {code}");
+                    }
+                    self.bubble("음성 인식이 계속 끊겨요. 더보기 메뉴에서 상태를 확인해 주세요");
+                }
+                self.restart_listener();
             } else if always
                 && iv.name_heard.get().is_none()
                 && iv.listener_since.get().is_none_or(|since| {
@@ -1397,9 +1437,8 @@ define_class!(
                 self.bubble("먼저 음성 명령을 켜 주세요");
                 return;
             }
-            if !self.voice_permitted() {
-                return;
-            }
+            // 권한이 아직 없어도 먼저 켠다. 권한 창이 뜨고, 허용하는 대로 저절로 듣기 시작한다
+            // (허용한 뒤 다시 눌러야 하면 켜진 줄 알고 지나치기 쉽다).
             let mtm = self.mtm();
             NSApplication::sharedApplication(mtm).activate();
             let alert = NSAlert::new(mtm);
@@ -1417,6 +1456,8 @@ define_class!(
             self.sync_always();
             if iv.listener.borrow().is_some() {
                 self.bubble("항상 듣기 켬 · \"아롱아\" 하고 불러 보세요");
+            } else if crate::voice::permission() == crate::voice::Permission::Allowed {
+                self.bubble("마이크를 열지 못했어요. 마이크 권한을 확인해 주세요");
             }
         }
 
@@ -1777,6 +1818,10 @@ impl Controller {
             typing_timer: RefCell::new(None),
             update_on: Cell::new(update_on),
             update_timer: RefCell::new(None),
+            update_checked: Cell::new(0),
+            update_tried: Cell::new(0),
+            update_told: Cell::new(0),
+            update_fails: Cell::new(0),
             new_version: RefCell::new(None),
             voice_on: Cell::new(voice_on),
             listener: RefCell::new(None),
@@ -1784,6 +1829,7 @@ impl Controller {
             voice_until: Cell::new(None),
             name_heard: Cell::new(None),
             voice_always: Cell::new(voice_always),
+            listen_errors: Cell::new(0),
             attention_until: Cell::new(None),
             listener_since: Cell::new(None),
             listen_failed: Cell::new(false),
@@ -2471,6 +2517,9 @@ impl Controller {
         add("음성 명령 (훈련에서 누를 때만 마이크 사용)", Some(sel!(toggleVoice:)), iv.voice_on.get());
         if iv.voice_on.get() {
             add("  항상 듣기 (\"아롱아\" 부르기 · 마이크 계속 사용)", Some(sel!(toggleAlways:)), iv.voice_always.get());
+            if iv.voice_always.get() {
+                add(&format!("    상태: {}", self.listen_status()), None, false);
+            }
         }
         add("Mac 켤 때 자동 실행", Some(sel!(toggleLogin:)), login_on);
         add("새 버전 확인 (하루 한 번 GitHub 접속)", Some(sel!(toggleUpdate:)), iv.update_on.get() == Some(true));
@@ -3329,6 +3378,26 @@ impl Controller {
         }
     }
 
+    /// 항상 듣기가 지금 실제로 듣고 있는지, 아니면 무엇이 막고 있는지.
+    fn listen_status(&self) -> String {
+        let iv = self.ivars();
+        match crate::voice::permission() {
+            crate::voice::Permission::NotAsked => return "음성 인식 권한을 아직 허용하지 않았어요".to_string(),
+            crate::voice::Permission::Denied => return "시스템 설정의 '음성 인식'에서 Arong이 꺼져 있어요".to_string(),
+            crate::voice::Permission::Allowed => {}
+        }
+        if iv.listener.borrow().is_none() {
+            return "마이크를 열지 못했어요 (마이크 권한·입력 장치 확인)".to_string();
+        }
+        if iv.listen_errors.get() >= 5 {
+            return match crate::voice::last_error() {
+                Some((domain, code)) => format!("음성 인식이 계속 끊겨요 ({domain} {code})"),
+                None => "음성 인식이 계속 끊겨요".to_string(),
+            };
+        }
+        "듣는 중".to_string()
+    }
+
     fn ensure_voice_timer(&self) {
         let iv = self.ivars();
         if iv.voice_timer.borrow().is_none() {
@@ -3436,12 +3505,40 @@ impl Controller {
     }
 
     /// 켜져 있으면 곧 한 번 확인하고 그 뒤로 하루에 한 번 확인한다. 꺼지면 타이머를 없앤다.
+    /// 확인 결과가 와 있으면 받아서, 더 높은 버전이면 알린다.
+    fn take_update_result(&self) {
+        let iv = self.ivars();
+        let Some(latest) = crate::update::take_latest() else { return };
+        iv.update_checked.set(now_wall());
+        iv.update_fails.set(0);
+        if iv.update_on.get() == Some(true) && crate::update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+            iv.new_version.replace(Some(latest));
+            self.announce_update();
+        }
+    }
+
+    /// 아롱이가 정면을 보며 새 버전을 직접 알려 준다. 놓치지 않도록 말풍선을 오래 띄우고, 몇 시간마다 다시 알린다.
+    fn announce_update(&self) {
+        let iv = self.ivars();
+        let Some(latest) = iv.new_version.borrow().clone() else { return };
+        // 숨겨 둔 동안에는 말풍선이 뜨지 않으니, 다시 보일 때 알리도록 미룬다.
+        if iv.hidden.get() {
+            return;
+        }
+        iv.update_told.set(now_wall());
+        if iv.walk.borrow().is_none() && iv.doorway.borrow().is_none() && !iv.held.get() {
+            self.stop_roam();
+            self.perform(Act::Look);
+        }
+        self.bubble_for(&format!("멍! 새 버전 {latest}이 나왔다멍! 더보기 메뉴에서 업데이트 해달라 멍!"), 10.0);
+    }
+
     fn sync_update(&self) {
         let iv = self.ivars();
         if iv.update_on.get() == Some(true) {
             if iv.update_timer.borrow().is_none() {
-                std::mem::forget(self.timer(8.0, sel!(updateTick:), false, 3.0));
-                iv.update_timer.replace(Some(self.timer(24.0 * 3600.0, sel!(updateTick:), true, 3600.0)));
+                std::mem::forget(self.timer(4.0, sel!(updateTick:), false, 1.0));
+                iv.update_timer.replace(Some(self.timer(300.0, sel!(updateTick:), true, 60.0)));
             }
         } else {
             Self::stop(&iv.update_timer);
@@ -3541,6 +3638,11 @@ impl Controller {
 
     /// 아롱이 위에 짧은 안내를 잠깐 띄운다. 마우스 이벤트는 통과시킨다.
     fn bubble(&self, text: &str) {
+        self.bubble_for(text, 2.2);
+    }
+
+    /// `secs`초 동안 띄운다.
+    fn bubble_for(&self, text: &str, secs: f64) {
         let mtm = self.mtm();
         let iv = self.ivars();
         let Some(pet_panel) = iv.panel.get() else { return };
@@ -3586,7 +3688,7 @@ impl Controller {
             old.orderOut(None);
         }
         Self::stop(&iv.bubble_timer);
-        iv.bubble_timer.replace(Some(self.timer(2.2, sel!(bubbleTick:), false, 0.3)));
+        iv.bubble_timer.replace(Some(self.timer(secs, sel!(bubbleTick:), false, 0.3)));
     }
 
     // ---- 꾸미기 ----

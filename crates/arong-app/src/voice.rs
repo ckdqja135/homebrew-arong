@@ -15,6 +15,7 @@
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use arong_core::{Command, Heard};
 use block2::RcBlock;
@@ -29,6 +30,17 @@ use objc2_speech::{
 
 /// 인식 결과로 찾은 명령(또는 이름 부르기). 메인 스레드가 가져간다.
 static HEARD: Mutex<Option<Heard>> = Mutex::new(None);
+/// 지금 인식 작업이 끝났는지(오류가 났거나 문장이 확정됐다). 끝난 작업은 더 듣지 못하므로 새로 열어야 한다.
+static ENDED: AtomicBool = AtomicBool::new(false);
+/// 몇 번째로 연 인식인지. 닫은 작업의 뒤늦은 콜백(취소 알림 등)이 새 작업의 상태를 건드리지 않게 한다.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// 마지막 인식 오류의 종류와 번호(진단용). 소리나 문장은 들어 있지 않다. 다시 알아들으면 지운다.
+static LAST_ERROR: Mutex<Option<(String, isize)>> = Mutex::new(None);
+
+/// 인식이 되지 않을 때 원인을 알려 주기 위한 마지막 오류(종류, 번호).
+pub fn last_error() -> Option<(String, isize)> {
+    LAST_ERROR.lock().ok()?.clone()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -121,6 +133,8 @@ impl Listener {
         if let Ok(mut heard) = HEARD.lock() {
             *heard = None;
         }
+        let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        ENDED.store(false, Ordering::Release);
         // SAFETY: 공개 API를 문서대로 쓴다. 요청은 반드시 기기 안 인식으로 제한한다.
         let request = unsafe {
             let request = SFSpeechAudioBufferRecognitionRequest::new();
@@ -131,9 +145,25 @@ impl Listener {
             request.setContextualStrings(&NSArray::from_retained_slice(&words));
             request
         };
-        let on_result = RcBlock::new(|result: *mut SFSpeechRecognitionResult, _error: *mut NSError| {
+        let on_result = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
+            if GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
             // SAFETY: 콜백이 도는 동안 유효하거나 null이다.
+            if let Some(error) = unsafe { error.as_ref() } {
+                // 오류가 나면 이 작업은 끝난 것이다(한동안 조용했을 때도 이렇게 끝난다). 종류와 번호만 남긴다.
+                if let Ok(mut last) = LAST_ERROR.lock() {
+                    *last = Some((error.domain().to_string(), error.code()));
+                }
+                ENDED.store(true, Ordering::Release);
+            }
             let Some(result) = (unsafe { result.as_ref() }) else { return };
+            if let Ok(mut last) = LAST_ERROR.lock() {
+                *last = None;
+            }
+            if unsafe { result.isFinal() } {
+                ENDED.store(true, Ordering::Release);
+            }
             // 문장은 여기서 명령으로 바꾼 뒤 버린다(저장·기록하지 않는다).
             let text = unsafe { result.bestTranscription().formattedString() }.to_string();
             if let (Some(found), Ok(mut heard)) = (Heard::from_speech(&text), HEARD.lock()) {
@@ -165,6 +195,11 @@ impl Listener {
         }
     }
 
+    /// 인식 작업이 끝나서 더는 듣지 못하는 상태인지.
+    pub fn ended(&self) -> bool {
+        ENDED.load(Ordering::Acquire)
+    }
+
     /// 지금까지 알아들은 것이 있으면 가져간다.
     pub fn heard(&self) -> Option<Heard> {
         HEARD.lock().ok()?.take()
@@ -173,6 +208,8 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        // 이 작업의 남은 콜백은 무시한다.
+        GENERATION.fetch_add(1, Ordering::AcqRel);
         // 감시 해제: 마이크 탭을 떼고 엔진을 멈춘 뒤 인식을 취소한다.
         let _ = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
             self.input.removeTapOnBus(0);
