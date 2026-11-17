@@ -1,6 +1,6 @@
 cask "arong" do
-  version "0.3.0"
-  sha256 "f1cdb76ba2e3038843b8c98d0323bf07306105a15ff254547b81d7c830f8351a"
+  version "0.3.1"
+  sha256 "2a7bb83b0e3012156181a7d42583c505ba91a746f9922187070ad82d5ed28ecd"
 
   url "https://github.com/ckdqja135/homebrew-arong/releases/download/v#{version}/Arong-#{version}-arm64.zip"
   name "Arong"
