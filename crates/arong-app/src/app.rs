@@ -941,13 +941,15 @@ define_class!(
                 self.rest();
             }
             // 2) 타일 메뉴들.
-            let panels: [(&str, &dyn Fn()); 5] = [
-                ("tiles_main.png", &|| self.open_main_tiles()),
-                ("tiles_shop.png", &|| self.open_shop_tiles()),
-                ("tiles_shoes.png", &|| self.open_category_tiles(Slot::Shoes)),
-                ("tiles_clothes.png", &|| self.open_category_tiles(Slot::Clothes)),
-                ("tiles_training.png", &|| self.open_training_tiles()),
+            // 부위별 목록은 모든 부위를 다 열어 본다(하나라도 죽으면 여기서 드러난다).
+            let mut panels: Vec<(String, Box<dyn Fn() + '_>)> = vec![
+                ("tiles_main.png".into(), Box::new(|| self.open_main_tiles())),
+                ("tiles_shop.png".into(), Box::new(|| self.open_shop_tiles())),
+                ("tiles_training.png".into(), Box::new(|| self.open_training_tiles())),
             ];
+            for slot in Slot::ALL {
+                panels.push((format!("tiles_{}.png", slot.key()), Box::new(move || self.open_category_tiles(slot))));
+            }
             for (name, open) in panels {
                 open();
                 let view = iv.tiles.borrow().as_ref().and_then(|p| p.contentView());
@@ -955,7 +957,7 @@ define_class!(
                     && let Some(rep) = view.bitmapImageRepForCachingDisplayInRect(view.bounds())
                 {
                     view.cacheDisplayInRect_toBitmapImageRep(view.bounds(), &rep);
-                    write(&rep, name);
+                    write(&rep, &name);
                 }
                 self.close_tiles();
             }
@@ -2784,8 +2786,9 @@ impl Controller {
     }
 
     fn open_category_tiles(&self, slot: Slot) {
-        let (coins, owned, worn, stage) =
-            self.with_pet(|p, _| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string), self.look_stage()));
+        let (coins, owned, worn) = self.with_pet(|p, _| (p.coins, p.owned.clone(), p.wearing(slot).map(str::to_string)));
+        // `with_pet` 안에서는 펫을 빌린 상태라 `look_stage`를 부를 수 없다(부르면 앱이 죽는다). 밖에서 구한다.
+        let stage = self.look_stage();
         // 목록이 길면 스크롤해야 하므로, 돌아가기는 늘 보이는 맨 앞에 둔다.
         let mut tiles = Vec::new();
         tiles.push(TileSpec {
