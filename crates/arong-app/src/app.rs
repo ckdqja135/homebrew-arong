@@ -409,6 +409,9 @@ pub struct Ivars {
 const UPDATE_EVERY_SECS: i64 = 20 * 3600;
 const UPDATE_REMIND_SECS: i64 = 3 * 3600;
 
+/// 성견이 엎드려 있는 자세: 구르기 그림의 첫 프레임.
+const LYING: (Motion, usize) = (Motion::Roll, 0);
+
 fn now_wall() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -856,6 +859,7 @@ define_class!(
                     (Motion::SitUp, None, true, false),
                     (Motion::LieDown, None, true, false),
                     (Motion::Roll, Some(4), true, false),
+                    (Motion::Roll, Some(0), true, false),
                     (Motion::Pant, Some(2), true, false),
                     (Motion::Look, Some(1), true, false),
                     (Motion::Look, Some(4), false, false),
@@ -2234,7 +2238,8 @@ impl Controller {
         let iv = self.ivars();
         let mut list: Vec<(Motion, usize)> = Vec::new();
         // 성견의 `Sit` 그림은 다른 성견 그림보다 몸집이 작게 그려져 있어서, 성견은 앉는 동작에 `SitUp` 그림을 쓴다.
-        let sit = if self.look_stage() == Stage::Adult { Motion::SitUp } else { Motion::Sit };
+        let adult = self.look_stage() == Stage::Adult;
+        let sit = if adult { Motion::SitUp } else { Motion::Sit };
         {
             let atlas = iv.atlas.borrow();
             let Some(a) = atlas.as_ref() else { return };
@@ -2250,6 +2255,25 @@ impl Controller {
                     list.extend(down(m));
                     list.extend(pause(m, if matches!(act, Act::Eat) { 22 } else { 12 }));
                     list.extend(up(m));
+                }
+                // 성견의 `LieDown` 그림은 서 있는 앞뒤 프레임이 다른 성견 그림보다 마르게 그려져 있다.
+                // 그래서 성견은 앉았다가 엎드리고(구르기 그림의 첫 프레임이 평소 모습 그대로 엎드린 자세다),
+                // 일어날 때도 앉았다가 선다. 눈 감고 자는 프레임만 `LieDown`에서 가져온다.
+                Act::Nap if adult => {
+                    list.extend(down(Motion::SitUp));
+                    list.extend([LYING; 3]);
+                    list.extend(pause(Motion::LieDown, 36));
+                    list.extend([LYING; 3]);
+                    list.extend(up(Motion::SitUp));
+                }
+                Act::Roll if adult => {
+                    list.extend(down(Motion::SitUp));
+                    list.extend(all(Motion::Roll));
+                    list.extend(up(Motion::SitUp));
+                }
+                Act::LieStay if adult => {
+                    list.extend(down(Motion::SitUp));
+                    list.push(LYING);
                 }
                 Act::Nap => {
                     list.extend(down(Motion::LieDown));
@@ -3261,7 +3285,8 @@ impl Controller {
         if !iv.held.get() {
             return;
         }
-        let motion = iv.motion.get();
+        // 성견이 엎드려 있을 때(구르기 그림의 첫 프레임)는 앉았다가 일어선다.
+        let motion = if iv.motion.get() == Motion::Roll { Motion::SitUp } else { iv.motion.get() };
         let list: Vec<(Motion, usize)> = match iv.atlas.borrow().as_ref() {
             Some(a) => (a.hold(motion)..a.len(motion)).map(|i| (motion, i)).collect(),
             None => return,

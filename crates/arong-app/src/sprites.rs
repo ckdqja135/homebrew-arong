@@ -17,7 +17,7 @@ use crate::art::{self, Art};
 pub const CELL: usize = 128;
 /// 발이 닿는 줄(위에서부터 px).
 pub const GROUND: f64 = 121.0;
-/// 걷기(옆모습) 그림은 서 있는 그림보다 작게 그려져 있어, 몸집이 비슷해 보이도록 키운다(아기, 성장기, 성견).
+/// 걷기(옆모습) 그림은 서 있는 그림보다 작게 그려져 있어, 몸집이 비슷해 보이도록 키운다(아기, 성장기). 성견 걷기 그림은 제 크기라 키우지 않는다.
 const WALK_SCALE: [f64; 3] = [1.0, 1.08, 1.12];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,7 +238,7 @@ pub struct Frame {
     pub head: (f64, f64),
     /// 어느 쪽에서 본 그림인지. 장식 위치가 달라진다.
     pub view: View,
-    /// 머리 위치를 믿을 수 있어 장식을 얹어도 되는지(구르는 동안은 얹지 않는다).
+    /// 머리 위치를 믿을 수 있어 장식을 얹어도 되는지(구르는 동안은 얹지 않는다. 성견의 엎드린 첫 프레임은 예외).
     pub wearable: bool,
 }
 
@@ -261,6 +261,7 @@ fn build(
     dressed: Option<(&[u8], Option<art::Tint>)>,
     stage: Stage,
     motion: Motion,
+    side: bool,
     shoes: Option<&str>,
 ) -> Option<(Vec<Frame>, Retained<CGImage>)> {
     let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
@@ -270,7 +271,6 @@ fn build(
         return None;
     }
     let count = width / CELL;
-    let side = motion == Motion::Walk;
     // 픽셀 사본은 기준점·경계 계산과 신발 칠하기에만 쓰고 바로 버린다.
     let mut pixels = Art::from_rep(&rep)?;
     let anchors: Vec<(i32, i32)> = (0..count).map(|col| art::head_anchor(&pixels, col, 0, CELL, side)).collect();
@@ -310,11 +310,12 @@ fn build(
             rect: (rx, ry, w as f64 * scale, h as f64 * scale),
             head: place(ax as f64, ay as f64),
             view: match motion {
-                Motion::Walk => View::Side,
+                Motion::Walk if side => View::Side,
                 Motion::Look => View::Front,
                 _ => View::Quarter,
             },
-            wearable: motion != Motion::Roll,
+            // 성견은 구르기의 첫 프레임(엎드린 자세)을 엎드려 머무는 그림으로도 쓰므로 거기에는 장식을 얹는다.
+            wearable: motion != Motion::Roll || (stage == Stage::Adult && col == 0),
         });
     }
     // 서 있는 자세가 0번이 되도록 돌린다.
@@ -332,7 +333,9 @@ impl Atlas {
         let mut sources = Vec::with_capacity(MOTIONS.len());
         for motion in MOTIONS {
             let dressed = clothes.and_then(|id| outfit_sheet(id, stage, motion));
-            let (frames, source) = build(sheets[motion as usize], dressed, stage, motion, shoes)?;
+            // 걷기는 옆모습 그림이다. 성견의 걷기 그림만 서 있는 그림과 같은 몸집·같은 시점(3/4 정면)으로 그려져 있다.
+            let side = motion == Motion::Walk && stage != Stage::Adult;
+            let (frames, source) = build(sheets[motion as usize], dressed, stage, motion, side, shoes)?;
             motions.push(frames);
             sources.push(source);
         }
@@ -410,8 +413,11 @@ mod tests {
                     assert!(w > 20.0 && h > 20.0 && w * h < cell * cell);
                     // 발(또는 배)이 바닥 줄 근처에 닿는다.
                     assert!((y + h - GROUND).abs() <= 7.0, "{stage:?} {motion:?} {index} bottom {}", y + h);
-                    assert_eq!(frame.view == View::Side, motion == Motion::Walk);
-                    assert_eq!(frame.wearable, motion != Motion::Roll);
+                    // 성견의 걷기 그림은 서 있는 그림과 같은 시점이다.
+                    assert_eq!(frame.view == View::Side, motion == Motion::Walk && stage != Stage::Adult);
+                    // 구르는 동안은 장식을 얹지 않는다. 성견의 첫 프레임(엎드린 자세)만 예외다.
+                    let lying = stage == Stage::Adult && motion == Motion::Roll && index == 0;
+                    assert_eq!(frame.wearable, motion != Motion::Roll || lying, "{stage:?} {motion:?} {index}");
                 }
             }
             // 기본 자세(왼발 주기 0번)와 앉기·엎드리기의 0번은 서 있는 자세라 키가 비슷하고,
