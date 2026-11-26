@@ -4,7 +4,7 @@
 //! 산책 모드 중에만 30Hz로 읽는 커서 위치(권한 불필요)뿐이다.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arong_core::{ActionResult, Command, Follower, Heard, Pet, Purchase, Slot, Stage, Tuning, Vec2, WalkMeter, WalkTuning};
@@ -134,7 +134,7 @@ fn tunables() -> [Tunable; 7] {
             set: |t, v| t.walk_xp_per_unit = v as u64,
         },
         Tunable {
-            label: "간식 가격 (재화)",
+            label: "기본 간식(개껌) 가격 (재화) · 다른 간식은 그 배수",
             key: "tune_snack_price",
             min: 0,
             max: 10_000,
@@ -168,8 +168,10 @@ enum Act {
     Nap,
     /// 엎드려서 배를 보이며 구르고 일어난다.
     Roll,
-    /// 앉아서 밥그릇 앞에서 먹는다.
+    /// 밥그릇 앞에 엎드려 사료를 먹는다.
     Eat,
+    /// 간식(`SNACKS`의 순서)을 받아 물고 먹는다.
+    Treat(usize),
     /// 엎드린 채로 머문다(방석 위, "엎드려").
     LieStay,
     /// 앉은 채로 머문다("앉아").
@@ -178,6 +180,27 @@ enum Act {
     Pant,
     /// 정면을 바라본다.
     Look,
+}
+
+/// 먹는 동안 보여 주는 소품의 한 순간. 프레임마다 하나씩 따라간다.
+#[derive(Clone, Copy)]
+struct Prop {
+    /// 무엇을 먹는지: `None`은 밥그릇, `Some(i)`는 `SNACKS[i]`.
+    snack: Option<usize>,
+    /// 남은 양(3 = 그대로 … 0 = 다 먹음).
+    left: u8,
+    /// 간식을 입에 물었는지. 아니면 얼굴 앞에 내밀어져 있다. 밥그릇은 늘 바닥에 놓인다.
+    held: bool,
+    /// 입가에 튀는 부스러기 무늬(1, 2). 0이면 없다.
+    crumbs: u8,
+}
+
+/// 소품 그림의 종류. 한 번 만든 그림은 다시 쓴다.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PropPic {
+    Bowl { left: u8, big: bool },
+    Snack { index: usize, left: u8 },
+    Crumbs(u8),
 }
 
 enum Drag {
@@ -239,6 +262,9 @@ enum TileAction {
     Training,
     Train(Command),
     Voice,
+    /// 간식 고르기, 간식 하나(`SNACKS`의 순서) 사서 주기.
+    Snacks,
+    Snack(usize),
     /// 상점의 부위별 목록.
     Category(Slot),
     Item(&'static str),
@@ -324,10 +350,12 @@ pub struct Ivars {
     /// 목록이 끝나면 서지 않고 마지막 자세(엎드림)로 머문다 / 지금 그렇게 머무는 중이다.
     stay_after: Cell<bool>,
     held: Cell<bool>,
-    /// 밥그릇을 보여 주는 중인지.
-    bowl: Cell<bool>,
-    bowl_layer: OnceCell<Retained<CALayer>>,
-    bowl_size: Cell<(f64, f64)>,
+    /// 지금 보여 주는 소품(밥그릇·간식)과, 남은 프레임에 하나씩 대응하는 소품 상태.
+    prop: Cell<Option<Prop>>,
+    props: RefCell<VecDeque<Option<Prop>>>,
+    food_layer: OnceCell<Retained<CALayer>>,
+    crumb_layer: OnceCell<Retained<CALayer>>,
+    prop_pics: RefCell<HashMap<PropPic, Option<(Retained<objc2_core_graphics::CGImage>, f64, f64)>>>,
     /// 집 안에 들어가 있어 보이지 않는 상태.
     inside: Cell<bool>,
     /// 집을 드나드는 중의 상태와 타이머, 그리고 그동안의 몸 크기 비율(평소 1).
@@ -411,6 +439,17 @@ const UPDATE_REMIND_SECS: i64 = 3 * 3600;
 
 /// 성견이 엎드려 있는 자세: 구르기 그림의 첫 프레임.
 const LYING: (Motion, usize) = (Motion::Roll, 0);
+
+/// 밥을 먹을 때 번갈아 보여 주는 두 프레임: 고개를 박은 자세와, 고개를 들고 씹는 자세.
+fn eating_frames(atlas: &Atlas) -> ((Motion, usize), (Motion, usize)) {
+    if atlas.stage == Stage::Adult {
+        // 성견은 엎드린 채 입을 벌린 그림이 구르기의 둘째 프레임에 있다.
+        (LYING, (Motion::Roll, 1))
+    } else {
+        let hold = atlas.hold(Motion::LieDown);
+        ((Motion::LieDown, hold), (Motion::LieDown, hold - 1))
+    }
+}
 
 fn now_wall() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -848,25 +887,37 @@ define_class!(
             if let Some(layer) = iv.panel.get().and_then(|p| p.contentView()).and_then(|v| v.layer()) {
                 let size = self.size() as isize;
                 let tall = (self.size() + self.head_room()) as isize;
-                // (동작, 프레임(None = 가장 깊이 앉거나 엎드린 프레임), 왼쪽을 보는지, 밥그릇)
+                let (bite, chew) = iv.atlas.borrow().as_ref().map_or((LYING, LYING), eating_frames);
+                let bowl = |left: u8, crumbs: u8| Some(Prop { snack: None, left, held: false, crumbs });
+                let treat = |index: usize, left: u8, held: bool| Some(Prop { snack: Some(index), left, held, crumbs: if held { 1 } else { 0 } });
+                // (동작, 프레임(None = 가장 깊이 앉거나 엎드린 프레임), 왼쪽을 보는지, 먹는 소품)
                 let shots = [
-                    (Motion::PawLeft, Some(0), true, false),
-                    (Motion::Walk, Some(2), true, false),
-                    (Motion::Walk, Some(7), false, false),
-                    (Motion::PawLeft, Some(4), true, false),
-                    (Motion::PawRight, Some(4), false, false),
-                    (Motion::Sit, None, true, true),
-                    (Motion::SitUp, None, true, false),
-                    (Motion::LieDown, None, true, false),
-                    (Motion::Roll, Some(4), true, false),
-                    (Motion::Roll, Some(0), true, false),
-                    (Motion::Pant, Some(2), true, false),
-                    (Motion::Look, Some(1), true, false),
-                    (Motion::Look, Some(4), false, false),
+                    (Motion::PawLeft, Some(0), true, None),
+                    (Motion::Walk, Some(2), true, None),
+                    (Motion::Walk, Some(7), false, None),
+                    (Motion::PawLeft, Some(4), true, None),
+                    (Motion::PawRight, Some(4), false, None),
+                    (Motion::Sit, None, true, None),
+                    (Motion::SitUp, None, true, None),
+                    (Motion::LieDown, None, true, None),
+                    (Motion::Roll, Some(4), true, None),
+                    (Motion::Roll, Some(0), true, None),
+                    (Motion::Pant, Some(2), true, None),
+                    (Motion::Look, Some(1), true, None),
+                    (Motion::Look, Some(4), false, None),
+                    // 밥: 고개를 박은 자세(가득), 씹는 자세(반쯤), 다 먹은 뒤.
+                    (bite.0, Some(bite.1), true, bowl(3, 1)),
+                    (chew.0, Some(chew.1), true, bowl(2, 0)),
+                    (bite.0, Some(bite.1), false, bowl(0, 2)),
+                    // 간식: 내밀었을 때, 물었을 때, 베어 먹는 중.
+                    (Motion::PawLeft, Some(4), true, treat(0, 3, false)),
+                    (Motion::Pant, Some(1), true, treat(5, 3, true)),
+                    (Motion::Pant, Some(3), true, treat(6, 2, true)),
+                    (Motion::Pant, Some(4), false, treat(8, 1, true)),
                 ];
-                for (i, (motion, frame, left, bowl)) in shots.into_iter().enumerate() {
+                for (i, (motion, frame, left, prop)) in shots.into_iter().enumerate() {
                     let frame = frame.unwrap_or_else(|| iv.atlas.borrow().as_ref().map_or(0, |a| a.hold(motion)));
-                    iv.bowl.set(bowl);
+                    iv.prop.set(prop);
                     iv.motion.set(motion);
                     iv.frame.set(frame);
                     iv.facing_left.set(left);
@@ -950,6 +1001,7 @@ define_class!(
                 ("tiles_main.png".into(), Box::new(|| self.open_main_tiles())),
                 ("tiles_shop.png".into(), Box::new(|| self.open_shop_tiles())),
                 ("tiles_training.png".into(), Box::new(|| self.open_training_tiles())),
+                ("tiles_snacks.png".into(), Box::new(|| self.open_snack_tiles())),
             ];
             for slot in Slot::ALL {
                 panels.push((format!("tiles_{}.png", slot.key()), Box::new(move || self.open_category_tiles(slot))));
@@ -984,6 +1036,18 @@ define_class!(
                 eprintln!("reference window {}", reference.windowNumber());
                 std::mem::forget(reference);
                 std::mem::forget(self.timer(1.5, sel!(probeTick:), false, 0.0));
+            }
+            // 4) 메뉴 막대 메뉴를 만들어 보고, 간식 메뉴 항목과 밥 주기를 실제로 눌러 본다(먹는 동작이 끝까지 짜이는지).
+            if let Some(menu) = iv.menu.get() {
+                self.rebuild_menu(menu);
+                let item = NSMenuItem::new(self.mtm());
+                item.setTag(5);
+                let (coins, mood) = (iv.pet.borrow().coins, iv.pet.borrow().mood);
+                let _: () = unsafe { msg_send![self, snack: &*item] };
+                eprintln!("snack: coins {coins} -> {}, mood {mood:.0} -> {:.0}, steps {} props {}", iv.pet.borrow().coins, iv.pet.borrow().mood, iv.script.borrow().len(), iv.props.borrow().len());
+                let _: () = unsafe { msg_send![self, feed: std::ptr::null::<AnyObject>()] };
+                eprintln!("feed: steps {} props {}", iv.script.borrow().len(), iv.props.borrow().len());
+                self.rest();
             }
             eprintln!("snapshot done");
         }
@@ -1529,13 +1593,10 @@ define_class!(
         }
 
         #[unsafe(method(snack:))]
-        fn snack(&self, _s: Option<&AnyObject>) {
-            let r = self.with_pet(|p, t| p.snack(t));
-            if r.ok {
-                self.after_action(r, Act::Paw(true), "간식 냠! 기분이 좋아졌어요".to_string());
-            } else {
-                self.bubble("재화가 부족해요");
-            }
+        fn snack(&self, sender: Option<&AnyObject>) {
+            // 메뉴 항목의 tag가 `SNACKS`에서의 순서다.
+            let index = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()).map_or(0, |item| item.tag());
+            self.give_snack(index as usize);
         }
 
         #[unsafe(method(stroke:))]
@@ -1784,9 +1845,11 @@ impl Controller {
             script: RefCell::new(VecDeque::new()),
             stay_after: Cell::new(false),
             held: Cell::new(false),
-            bowl: Cell::new(false),
-            bowl_layer: OnceCell::new(),
-            bowl_size: Cell::new((0.0, 0.0)),
+            prop: Cell::new(None),
+            props: RefCell::new(VecDeque::new()),
+            food_layer: OnceCell::new(),
+            crumb_layer: OnceCell::new(),
+            prop_pics: RefCell::new(HashMap::new()),
             inside: Cell::new(false),
             doorway: RefCell::new(None),
             door_timer: RefCell::new(None),
@@ -1907,17 +1970,14 @@ impl Controller {
             layer
         });
         let _ = iv.acc_layers.set(acc_layers);
-        let bowl = CALayer::new();
-        bowl.setMagnificationFilter(unsafe { objc2_quartz_core::kCAFilterNearest });
-        bowl.setHidden(true);
-        let bowl_art = crate::art::bowl_art();
-        if let Some(image) = bowl_art.cg_image() {
-            // SAFETY: CGImage는 CALayer.contents로 쓸 수 있는 CF 객체이고, 레이어가 retain한다.
-            unsafe { bowl.setContents(Some(&*(Retained::as_ptr(&image) as *const AnyObject))) };
-            iv.bowl_size.set((bowl_art.w as f64, bowl_art.h as f64));
+        // 먹을 것(밥그릇·간식)과 부스러기. 스프라이트의 자식이라 좌우 반전을 함께 따른다.
+        for slot in [&iv.food_layer, &iv.crumb_layer] {
+            let layer = CALayer::new();
+            layer.setMagnificationFilter(unsafe { objc2_quartz_core::kCAFilterNearest });
+            layer.setHidden(true);
+            sprite.addSublayer(&layer);
+            let _ = slot.set(layer);
         }
-        sprite.addSublayer(&bowl);
-        let _ = iv.bowl_layer.set(bowl);
         panel.setContentView(Some(&view));
         let _ = iv.sprite.set(sprite);
         let _ = iv.panel.set(panel);
@@ -2154,6 +2214,17 @@ impl Controller {
         self.bubble(&message);
     }
 
+    /// 간식 하나를 사서 바로 먹인다.
+    fn give_snack(&self, index: usize) {
+        let Some(snack) = arong_core::SNACKS.get(index) else { return };
+        let r = self.with_pet(|p, t| p.snack(t, snack));
+        if r.ok {
+            self.after_action(r, Act::Treat(index), format!("{} 냠! 기분이 좋아졌어요", snack.name));
+        } else {
+            self.bubble("재화가 부족해요");
+        }
+    }
+
     fn do_stroke(&self) {
         let r = self.with_pet(|p, t| p.stroke(t));
         let message = if r.xp > 0 { format!("좋아! +{} XP", r.xp) } else { "좋아!".to_string() };
@@ -2224,19 +2295,69 @@ impl Controller {
                 }
             }
         }
-        if let Some(bowl) = iv.bowl_layer.get() {
-            // 밥그릇은 얼굴 앞(왼쪽) 바닥에 놓는다.
-            let (w, h) = iv.bowl_size.get();
-            bowl.setHidden(!iv.bowl.get());
-            bowl.setFrame(CGRect::new(CGPoint::new(2.0 * k, (cell - GROUND) * k), CGSize::new(w * k, h * k)));
+        if let (Some(food), Some(crumbs)) = (iv.food_layer.get(), iv.crumb_layer.get()) {
+            let prop = iv.prop.get();
+            let stage = crate::art::stage_index(atlas.stage);
+            let (mdx, mdy) = crate::art::MOUTH_OFFSET[stage];
+            // 입 위치: 이 프레임의 머리 꼭대기에서 단계별로 정해 둔 만큼 내려온 곳.
+            let (mx, my) = (frame.head.0 + mdx as f64, frame.head.1 + mdy as f64);
+            let place = |layer: &CALayer, pic: Option<(Retained<objc2_core_graphics::CGImage>, f64, f64)>, at: &dyn Fn(f64, f64) -> (f64, f64)| {
+                layer.setHidden(pic.is_none());
+                if let Some((image, w, h)) = pic {
+                    // SAFETY: CGImage는 CALayer.contents로 쓸 수 있는 CF 객체이고, 레이어가 retain한다.
+                    unsafe { layer.setContents(Some(&*(Retained::as_ptr(&image) as *const AnyObject))) };
+                    let (x, y) = at(w, h);
+                    layer.setFrame(CGRect::new(CGPoint::new(x * k, (cell - y - h) * k), CGSize::new(w * k, h * k)));
+                }
+            };
+            let pic = prop.and_then(|p| match p.snack {
+                None => self.prop_pic(PropPic::Bowl { left: p.left, big: stage > 0 }),
+                Some(_) if p.left == 0 => None,
+                Some(index) => self.prop_pic(PropPic::Snack { index, left: p.left }),
+            });
+            match prop {
+                // 밥그릇은 엎드렸을 때 입이 오는 자리 바로 아래 바닥에 놓고, 먹는 동안 움직이지 않는다.
+                Some(Prop { snack: None, .. }) => {
+                    let (bite, _) = eating_frames(atlas);
+                    let bx = atlas.frame(bite.0, bite.1).head.0 + mdx as f64 + 4.0;
+                    place(food, pic, &|w, h| ((bx - w).max(0.0), GROUND + 1.0 - h));
+                }
+                // 간식은 입에 문 쪽(오른쪽 끝)을 입에 맞춘다. 물기 전에는 얼굴 앞에 조금 떨어져 있다.
+                Some(p) => {
+                    let reach = if p.held { 4.0 } else { -8.0 };
+                    place(food, pic, &|w, h| ((mx + reach - w).max(0.0), my - h / 2.0));
+                }
+                None => place(food, None, &|_, _| (0.0, 0.0)),
+            }
+            let bits = prop.filter(|p| p.crumbs > 0).and_then(|p| self.prop_pic(PropPic::Crumbs(p.crumbs)));
+            place(crumbs, bits, &|w, _| ((mx - w + 2.0).max(0.0), my));
         }
         CATransaction::commit();
+    }
+
+    /// 소품 그림과 그 크기(스프라이트 px). 처음 쓸 때 한 번 그려 둔다.
+    fn prop_pic(&self, which: PropPic) -> Option<(Retained<objc2_core_graphics::CGImage>, f64, f64)> {
+        self.ivars()
+            .prop_pics
+            .borrow_mut()
+            .entry(which)
+            .or_insert_with(|| {
+                let art = match which {
+                    PropPic::Bowl { left, big } => crate::art::bowl_art(left, big),
+                    PropPic::Snack { index, left } => crate::art::bitten(&crate::art::snack_art(arong_core::SNACKS.get(index)?.id)?, left),
+                    PropPic::Crumbs(pattern) => crate::art::crumbs_art(pattern),
+                };
+                Some((art.cg_image()?, art.w as f64, art.h as f64))
+            })
+            .clone()
     }
 
     /// 행동 하나를 프레임 목록으로 풀어 재생한다. 타이머는 재생 중에만 돈다.
     fn perform(&self, act: Act) {
         let iv = self.ivars();
         let mut list: Vec<(Motion, usize)> = Vec::new();
+        // 먹는 행동에서만 채운다: `list`의 프레임마다 보여 줄 소품.
+        let mut props: Vec<Option<Prop>> = Vec::new();
         // 성견의 `Sit` 그림은 다른 성견 그림보다 몸집이 작게 그려져 있어서, 성견은 앉는 동작에 `SitUp` 그림을 쓴다.
         let adult = self.look_stage() == Stage::Adult;
         let sit = if adult { Motion::SitUp } else { Motion::Sit };
@@ -2250,11 +2371,42 @@ impl Controller {
             let pause = |m: Motion, ticks: usize| std::iter::repeat_n((m, a.hold(m)), ticks);
             match act {
                 Act::Paw(left) => list.extend(all(if left { Motion::PawLeft } else { Motion::PawRight })),
-                Act::Sit | Act::SitUp | Act::Eat => {
+                Act::Sit | Act::SitUp => {
                     let m = if matches!(act, Act::SitUp) { Motion::SitUp } else { sit };
                     list.extend(down(m));
-                    list.extend(pause(m, if matches!(act, Act::Eat) { 22 } else { 12 }));
+                    list.extend(pause(m, 12));
                     list.extend(up(m));
+                }
+                Act::Eat => {
+                    // 밥그릇 앞에 엎드려, 고개를 박고 먹다가 들어서 씹기를 되풀이한다. 그때마다 사료가 줄어든다.
+                    let bowl = |left: u8, crumbs: u8| Some(Prop { snack: None, left, held: false, crumbs });
+                    let lie = if adult { Motion::SitUp } else { Motion::LieDown };
+                    let (bite, chew) = eating_frames(a);
+                    let mut steps: Vec<((Motion, usize), Option<Prop>)> = down(lie).map(|f| (f, bowl(3, 0))).collect();
+                    for left in [2, 1, 0] {
+                        steps.extend([(bite, bowl(left + 1, 0)), (bite, bowl(left + 1, 1)), (bite, bowl(left, 2)), (bite, bowl(left, 1))]);
+                        steps.extend([(chew, bowl(left, 0)); 2]);
+                    }
+                    steps.extend([(bite, bowl(0, 0)); 2]);
+                    steps.extend(up(lie).chain(all(Motion::Pant)).map(|f| (f, bowl(0, 0))));
+                    (list, props) = steps.into_iter().unzip();
+                }
+                Act::Treat(index) => {
+                    let treat = |left: u8, held: bool, crumbs: u8| Some(Prop { snack: Some(index), left, held, crumbs });
+                    // 내민 간식을 보고 발을 내밀었다가,
+                    let mut steps: Vec<((Motion, usize), Option<Prop>)> = all(Motion::PawLeft).map(|f| (f, treat(3, false, 0))).collect();
+                    // 받아 물고 세 입에 나눠 먹는다. 헥헥거리는 그림의 입·고개 움직임이 씹는 모습이 된다.
+                    let count = a.len(Motion::Pant);
+                    for left in [2, 1, 0] {
+                        for i in 0..count {
+                            let bitten = i >= count / 2;
+                            let prop = if bitten { treat(left, true, 1 + (i % 2) as u8) } else { treat(left + 1, true, 0) };
+                            steps.push(((Motion::Pant, i), prop));
+                        }
+                    }
+                    // 다 먹고 입맛을 다신다.
+                    steps.extend(all(Motion::Pant).map(|f| (f, None)));
+                    (list, props) = steps.into_iter().unzip();
                 }
                 // 성견의 `LieDown` 그림은 서 있는 앞뒤 프레임이 다른 성견 그림보다 마르게 그려져 있다.
                 // 그래서 성견은 앉았다가 엎드리고(구르기 그림의 첫 프레임이 평소 모습 그대로 엎드린 자세다),
@@ -2302,8 +2454,8 @@ impl Controller {
         }
         iv.held.set(false);
         iv.stay_after.set(matches!(act, Act::LieStay | Act::SitStay));
-        iv.bowl.set(matches!(act, Act::Eat));
         iv.script.replace(list.into());
+        iv.props.replace(props.into());
         self.advance_script();
         if iv.anim_timer.borrow().is_none() {
             let timer = self.timer(1.0 / FPS, sel!(animTick:), true, 0.02);
@@ -2319,6 +2471,7 @@ impl Controller {
             Some((motion, frame)) => {
                 iv.motion.set(motion);
                 iv.frame.set(frame);
+                iv.prop.set(iv.props.borrow_mut().pop_front().flatten());
                 self.show_frame();
                 true
             }
@@ -2333,7 +2486,8 @@ impl Controller {
         iv.script.borrow_mut().clear();
         iv.stay_after.set(false);
         iv.held.set(false);
-        iv.bowl.set(false);
+        iv.props.borrow_mut().clear();
+        iv.prop.set(None);
         iv.motion.set(Motion::PawLeft);
         iv.frame.set(0);
         iv.hop.set((0.0, 0.0));
@@ -2372,7 +2526,8 @@ impl Controller {
         iv.script.borrow_mut().clear();
         iv.stay_after.set(false);
         iv.held.set(false);
-        iv.bowl.set(false);
+        iv.props.borrow_mut().clear();
+        iv.prop.set(None);
         iv.motion.set(Motion::Walk);
         let k = self.size() / CELL as f64;
         // 걷기 한 사이클(12프레임) 동안 나아가는 거리. 달릴 때는 보폭을 넓게 본다.
@@ -2474,8 +2629,24 @@ impl Controller {
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("밥 주기", Some(sel!(feed:)), false);
-        let snack = add(&format!("간식 주기 (재화 {})", iv.tuning.borrow().snack_price), Some(sel!(snack:)), false);
-        snack.setEnabled(coins >= iv.tuning.borrow().snack_price);
+        let snacks = NSMenu::new(mtm);
+        snacks.setAutoenablesItems(false);
+        for (index, snack) in arong_core::SNACKS.iter().enumerate() {
+            let price = snack.price(&iv.tuning.borrow());
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    mtm.alloc(),
+                    &NSString::from_str(&format!("{} (재화 {price})", snack.name)),
+                    Some(sel!(snack:)),
+                    ns_string!(""),
+                )
+            };
+            unsafe { item.setTarget(Some(self)) };
+            item.setTag(index as isize);
+            item.setEnabled(coins >= price);
+            snacks.addItem(&item);
+        }
+        add("간식 주기", Some(sel!(noop:)), false).setSubmenu(Some(&snacks));
         add("쓰다듬기", Some(sel!(stroke:)), false);
         add("산책 모드", Some(sel!(toggleWalk:)), iv.walk.borrow().is_some());
         add("우클릭: 타일 메뉴 · 끌기: 위치 이동", None, false);
@@ -2740,13 +2911,7 @@ impl Controller {
         };
         let tiles = vec![
             tile(&["fork.knife"], "밥 주기", true, false, TileAction::Send(sel!(feed:))),
-            tile(
-                &["birthday.cake.fill", "gift.fill"],
-                &format!("간식 ({})", iv.tuning.borrow().snack_price),
-                coins >= iv.tuning.borrow().snack_price,
-                false,
-                TileAction::Send(sel!(snack:)),
-            ),
+            tile(&["birthday.cake.fill", "gift.fill"], "간식", true, false, TileAction::Snacks),
             tile(&["heart.fill"], "쓰다듬기", true, false, TileAction::Send(sel!(stroke:))),
             tile(&["figure.walk"], if walking { "산책 끝내기" } else { "산책" }, true, walking, TileAction::Send(sel!(toggleWalk:))),
             tile(&["bag.fill", "cart.fill"], "상점", true, false, TileAction::Shop),
@@ -2807,6 +2972,28 @@ impl Controller {
             action: TileAction::MainMenu,
         });
         self.show_tiles(&format!("상점 · 재화 {coins}"), "부위를 골라 구경하세요", tiles);
+    }
+
+    fn open_snack_tiles(&self) {
+        let coins = self.with_pet(|p, _| p.coins);
+        let mut tiles = vec![TileSpec {
+            icon: TileIcon::Symbol(&["arrow.uturn.backward.circle.fill", "arrow.uturn.backward"]),
+            caption: "돌아가기".to_string(),
+            enabled: true,
+            active: false,
+            action: TileAction::MainMenu,
+        }];
+        for (index, snack) in arong_core::SNACKS.iter().enumerate() {
+            let price = snack.price(&self.ivars().tuning.borrow());
+            tiles.push(TileSpec {
+                icon: art_icon(crate::art::snack_art(snack.id), 2.0),
+                caption: format!("{} · {price}", snack.name),
+                enabled: coins >= price,
+                active: false,
+                action: TileAction::Snack(index),
+            });
+        }
+        self.show_tiles(&format!("간식 · 재화 {coins}"), "누르면 사서 바로 줘요 · 비쌀수록 기분이 많이 올라요", tiles);
     }
 
     fn open_category_tiles(&self, slot: Slot) {
@@ -3064,6 +3251,8 @@ impl Controller {
                 self.open_training_tiles();
             }
             TileAction::MainMenu => self.open_main_tiles(),
+            TileAction::Snacks => self.open_snack_tiles(),
+            TileAction::Snack(index) => self.give_snack(index),
             TileAction::Category(slot) => self.open_category_tiles(slot),
             TileAction::Item(id) => {
                 let Some(def) = arong_core::shop::item(id) else { return };
@@ -3294,6 +3483,7 @@ impl Controller {
         iv.held.set(false);
         iv.stay_after.set(false);
         iv.script.replace(list.into());
+        iv.props.borrow_mut().clear();
         self.advance_script();
         if iv.anim_timer.borrow().is_none() {
             iv.anim_timer.replace(Some(self.timer(1.0 / FPS, sel!(animTick:), true, 0.02)));

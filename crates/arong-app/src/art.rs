@@ -801,6 +801,8 @@ pub fn accessory_art(id: &str) -> Option<Accessory> {
 
 /// 얼굴이 살짝 왼쪽을 보고 있어서 눈은 머리 중심보다 왼쪽에 있다.
 const GLASSES_OFFSET: [(i32, i32); 3] = [(-6, 22), (-6, 26), (-8, 30)];
+/// 입 위치(단계별): 머리 꼭대기 중심에서 본 (dx, dy) px. 먹을 것을 입에 맞출 때 쓴다.
+pub const MOUTH_OFFSET: [(i32, i32); 3] = [(-3, 45), (-2, 46), (-7, 49)];
 pub const NECK_OFFSET: [(i32, i32); 3] = [(-4, 44), (-4, 48), (-6, 54)];
 /// 정면 보기에서는 얼굴이 가운데에 온다(성장기는 살짝 왼쪽을 본 채로 그려져 있다).
 const GLASSES_FRONT_OFFSET: [(i32, i32); 3] = [(0, 24), (-4, 26), (0, 30)];
@@ -930,25 +932,183 @@ pub fn wear_color(id: &str) -> Option<Rgba> {
         "red_sandals" => [222, 62, 62, 255],
         "blue_sandals" => [70, 124, 214, 255],
         "pink_sandals" => [244, 120, 168, 255],
+        "black_oxfords" => [52, 52, 60, 255],
+        "brown_oxfords" => [128, 78, 44, 255],
+        "wine_oxfords" => [128, 36, 52, 255],
+        "white_oxfords" => [238, 236, 228, 255],
+        "red_oxfords" => [206, 44, 52, 255],
         _ => return None,
     })
 }
 
-/// 밥 먹을 때 발 앞에 놓는 밥그릇.
-pub fn bowl_art() -> Art {
+/// 밥 먹을 때 앞에 놓는 밥그릇. `left`는 남은 사료(3 = 가득 … 0 = 빈 그릇). 크기는 남은 양과 상관없이 같다.
+/// `big`은 몸집이 큰 단계(성장기·성견)용이다.
+pub fn bowl_art(left: u8, big: bool) -> Art {
+    let food: [&str; 2] = match left {
+        0 => ["..............", ".............."],
+        1 => ["..............", "....fFff......"],
+        2 => ["..............", "..ffFffffFff.."],
+        _ => ["...ffffffff...", "..ffFffffFff.."],
+    };
     Art::from_ascii(
-        &[
-            "...ffffffff...",
-            "..ffFffffFff..",
-            "bbbbbbbbbbbbbb",
-            "bBBbbbbbbbbbbb",
-            ".bbbbbbbbbbbb.",
-            "..dddddddddd..",
-        ],
-        &[('f', [176, 116, 62, 255]), ('F', [214, 160, 96, 255]), ('b', C), ('B', W), ('d', CD)],
+        &[food[0], food[1], "bbbbbbbbbbbbbb", "bBBbbbbbbbbbbb", ".bbbbbbbbbbbb.", "..dddddddddd.."],
+        &[('f', KIBBLE), ('F', KIBBLE_LIGHT), ('b', C), ('B', W), ('d', CD)],
         true,
     )
-    .scaled(ACC_SCALE)
+    .scaled(if big { ACC_SCALE + 1 } else { ACC_SCALE })
+}
+
+const KIBBLE: Rgba = [176, 116, 62, 255];
+const KIBBLE_LIGHT: Rgba = [214, 160, 96, 255];
+
+/// 간식 그림. 아롱이가 왼쪽을 볼 때 입에 무는 쪽이 오른쪽이다.
+pub fn snack_art(id: &str) -> Option<Art> {
+    let (rows, palette): (&[&str], &[(char, Rgba)]) = match id {
+        "gum" => (
+            &[
+                ".kk......kk.",
+                "kkkkkkkkkkkk",
+                "kkKkkkkkkKkk",
+                ".kk......kk.",
+            ],
+            &[('k', [236, 214, 170, 255]), ('K', [250, 238, 208, 255])],
+        ),
+        "carrot" => (
+            &[
+                "g.g.........",
+                ".ggoooooo...",
+                "ggoooOooooo.",
+                ".ggoooooo...",
+                "g.g.........",
+            ],
+            &[('g', GR), ('o', O), ('O', OL)],
+        ),
+        "sweet_potato" => (
+            &[
+                "..pppppp...",
+                ".ppyyyyppp.",
+                "ppyyYyyyypp",
+                ".ppyyyyppp.",
+                "..pppppp...",
+            ],
+            &[('p', [150, 82, 96, 255]), ('y', [246, 196, 84, 255]), ('Y', [255, 228, 144, 255])],
+        ),
+        "jerky" => (
+            &[
+                ".rrrrrrrrr..",
+                "rrRrrrrRrrr.",
+                ".rrrrRrrrrrr",
+                "..rrrrrrrrr.",
+            ],
+            &[('r', [150, 58, 44, 255]), ('R', [198, 98, 72, 255])],
+        ),
+        "cheese" => (
+            &[
+                "......yyyy",
+                "...yyyyyyy",
+                "yyyyyhyyyy",
+                "yyhyyyyyhy",
+                "yyyyyyyyyy",
+            ],
+            &[('y', [250, 204, 70, 255]), ('h', [214, 158, 40, 255])],
+        ),
+        "bone" => (
+            &[
+                "...mmmmmm...",
+                "w.mmMMmmmm.w",
+                "wwmmMmmmmmww",
+                "w.mmmmmmmm.w",
+                "...mmmmmm...",
+            ],
+            &[('m', [168, 84, 50, 255]), ('M', [216, 134, 86, 255]), ('w', W)],
+        ),
+        "drumstick" => (
+            &[
+                "......dddd.",
+                "w...dddDddd",
+                "wwwwddDdddd",
+                "w...ddddddd",
+                "......dddd.",
+            ],
+            &[('d', [206, 140, 60, 255]), ('D', [242, 192, 112, 255]), ('w', W)],
+        ),
+        "puppuccino" => (
+            &[
+                "..www..",
+                ".wwWww.",
+                "wwwwwww",
+                "ccccccc",
+                ".csssc.",
+                ".csssc.",
+                "..ccc..",
+            ],
+            &[('w', [250, 244, 232, 255]), ('W', [255, 255, 255, 255]), ('c', [236, 232, 224, 255]), ('s', [196, 140, 90, 255])],
+        ),
+        "cake" => (
+            &[
+                "....f....",
+                "....s....",
+                ".ppppppp.",
+                "pPpppppPp",
+                "ccccccccc",
+                "kkkkkkkkk",
+                "ccccccccc",
+            ],
+            &[
+                ('f', [255, 186, 64, 255]),
+                ('s', [120, 190, 240, 255]),
+                ('p', PINK),
+                ('P', PINKL),
+                ('c', [250, 226, 170, 255]),
+                ('k', [224, 98, 112, 255]),
+            ],
+        ),
+        _ => return None,
+    };
+    Some(Art::from_ascii(rows, palette, true).scaled(ACC_SCALE))
+}
+
+/// 베어 먹은 모습. `left`는 남은 양(3 = 그대로, 2·1 = 오른쪽부터 한 입씩 줄어든다). 남은 부분만 잘라서 돌려준다.
+pub fn bitten(art: &Art, left: u8) -> Art {
+    if left >= 3 {
+        return art.clone();
+    }
+    // 베어 문 자리는 가운데가 가장 깊은 둥근 자국이다.
+    let r = art.h as f64 * 0.55;
+    let (cx, cy) = (art.w as f64 * left as f64 / 3.0 + r, art.h as f64 / 2.0);
+    let gone = |x: i32, y: i32| {
+        let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+        dx >= 0.0 || dx * dx + dy * dy < r * r
+    };
+    let mut rest = Art::new(art.w, art.h);
+    for y in 0..art.h as i32 {
+        for x in 0..art.w as i32 {
+            if gone(x, y) || art.get(x, y)[3] == 0 {
+                continue;
+            }
+            // 잘린 면에는 외곽선을 다시 두른다.
+            let cut = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| gone(x + dx, y + dy) && art.get(x + dx, y + dy)[3] > 0);
+            rest.set(x, y, if cut { OUTLINE } else { art.get(x, y) });
+        }
+    }
+    let Some((x0, y0, w, h)) = rest.opaque_bounds(0, 0, rest.w, rest.h) else { return rest };
+    let mut out = Art::new(w, h);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            out.set(x, y, rest.get(x0 as i32 + x, y0 as i32 + y));
+        }
+    }
+    out
+}
+
+/// 먹는 동안 입가에 튀는 부스러기. 두 가지 무늬를 번갈아 쓴다.
+pub fn crumbs_art(pattern: u8) -> Art {
+    let rows: [&str; 4] = if pattern % 2 == 0 {
+        ["c.....", "...c..", ".....c", ".c...."]
+    } else {
+        ["..c...", ".....c", "c.....", "...c.."]
+    };
+    Art::from_ascii(&rows, &[('c', KIBBLE_LIGHT)], false).scaled(ACC_SCALE)
 }
 
 /// 상점에 보여 줄 색 견본.
@@ -1047,7 +1207,7 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba, style: ShoeStyle) 
                 let width = end - start;
                 let height = match style {
                     ShoeStyle::Boot => (width * 3 / 4).clamp(7, BOOT_H),
-                    ShoeStyle::Sneaker => (width * 3 / 5).clamp(6, 8),
+                    ShoeStyle::Sneaker | ShoeStyle::Dress => (width * 3 / 5).clamp(6, 8),
                     ShoeStyle::Sandal => (width / 2).clamp(5, 7),
                 };
                 let top = sole - height + 1;
@@ -1114,6 +1274,27 @@ pub fn paint_shoes(atlas: &mut Art, cell: usize, color: Rgba, style: ShoeStyle) 
                                     continue;
                                 }
                             }
+                            // 구두: 앞창과 뒤굽 사이가 뜬 밑창, 반짝이는 앞코, 끈 두 점.
+                            ShoeStyle::Dress => {
+                                let heel = fx >= end - 4;
+                                if y == sole && !heel && fx >= start + width * 2 / 5 {
+                                    CLEAR
+                                } else if y == sole || (y == sole - 1 && heel) {
+                                    SOLE
+                                } else if y == top {
+                                    shade(color, 0.6)
+                                } else if (y == top + 2 && (fx == start + 1 || fx == start + 2)) || (y == top + 3 && fx == start + 1) {
+                                    gloss(color)
+                                } else if fx == start + 4 && y > top + 1 {
+                                    shade(color, 0.72)
+                                } else if y == top + 1 && (fx == start + 6 || fx == start + 8) {
+                                    gloss(color)
+                                } else if fx == end - 1 {
+                                    shade(color, 0.6)
+                                } else {
+                                    color
+                                }
+                            }
                         };
                         atlas.set(ox + fx, oy + y, c);
                     }
@@ -1129,9 +1310,16 @@ pub enum ShoeStyle {
     Boot,
     Sneaker,
     Sandal,
+    Dress,
 }
 
 const SNEAKER_WHITE: Rgba = [244, 244, 240, 255];
+
+/// 구두 앞코의 광택: 원래 색을 흰색 쪽으로 밝힌다.
+fn gloss(c: Rgba) -> Rgba {
+    let up = |v: u8| v + ((255 - v) as f64 * 0.6) as u8;
+    [up(c[0]), up(c[1]), up(c[2]), c[3]]
+}
 const SANDAL_SOLE: Rgba = [176, 124, 76, 255];
 
 /// 아이템 id로 신발 모양을 정한다.
@@ -1140,6 +1328,8 @@ pub fn shoe_style(id: &str) -> ShoeStyle {
         ShoeStyle::Sneaker
     } else if id.ends_with("_sandals") {
         ShoeStyle::Sandal
+    } else if id.ends_with("_oxfords") {
+        ShoeStyle::Dress
     } else {
         ShoeStyle::Boot
     }
@@ -1173,6 +1363,19 @@ pub fn shoe_icon(color: Rgba, style: ShoeStyle) -> Art {
                 "tttttttttttt",
             ],
             &[('c', color), ('d', shade(color, 0.75)), ('L', shade(color, 1.2)), ('s', SANDAL_SOLE), ('t', shade(SANDAL_SOLE, 0.6))],
+            true,
+        ),
+        ShoeStyle::Dress => Art::from_ascii(
+            &[
+                "......ddddd.",
+                ".....cgcgcce",
+                "..cccscccccc",
+                ".cggcsccccce",
+                "cgccccccccce",
+                "SSSSSSSSSSSS",
+                "SSSSS...SSSS",
+            ],
+            &[('c', color), ('d', shade(color, 0.6)), ('e', shade(color, 0.6)), ('s', shade(color, 0.72)), ('g', gloss(color)), ('S', SOLE)],
             true,
         ),
     }
@@ -1280,7 +1483,21 @@ mod tests {
             assert!(house_art(level).expect("house art").cg_image().is_some());
         }
         assert!(house_art(0).is_none());
-        assert!(bowl_art().cg_image().is_some());
+        for left in 0..=3 {
+            // 남은 양이 달라도 그릇 크기는 같다.
+            assert_eq!((bowl_art(left, false).w, bowl_art(left, false).h), (bowl_art(3, false).w, bowl_art(3, false).h));
+            assert!(bowl_art(left, true).cg_image().is_some());
+        }
+        for snack in &arong_core::SNACKS {
+            let whole = snack_art(snack.id).unwrap_or_else(|| panic!("no art for {}", snack.id));
+            // 베어 먹을수록 짧아지고, 남은 부분만 담긴다.
+            let (two, one) = (bitten(&whole, 2), bitten(&whole, 1));
+            assert_eq!(bitten(&whole, 3).w, whole.w);
+            assert!(one.w < two.w && two.w < whole.w && one.w >= 3, "{} {} {} {}", snack.id, whole.w, two.w, one.w);
+            assert!(one.cg_image().is_some());
+        }
+        assert!(snack_art("nope").is_none());
+        assert_ne!(crumbs_art(1).px, crumbs_art(2).px);
     }
 
     #[test]

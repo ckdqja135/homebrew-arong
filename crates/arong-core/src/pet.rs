@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::shop::Slot;
+use crate::shop::{Slot, SnackDef};
 use crate::training::Command;
 
 /// 조정 가능한 초기값. 확정값이 아니라 써 보면서 바꾸는 숫자들이다.
@@ -15,9 +15,8 @@ pub struct Tuning {
     pub feed_satiety: f64,
     pub feed_xp: u64,
     pub feed_xp_per_day: u32,
+    /// 기본 간식의 가격. 다른 간식은 이 값의 몇 배로 정해진다(`SnackDef::price_x`).
     pub snack_price: i64,
-    pub snack_satiety: f64,
-    pub snack_mood: f64,
     pub pet_mood: f64,
     pub pet_xp: u64,
     pub pet_xp_per_day: u32,
@@ -52,9 +51,8 @@ pub struct Tuning {
     pub train_xp: u64,
     pub train_xp_per_day: u32,
     pub train_mood: f64,
-    /// 밥·간식을 줄 때 오르는 친밀도.
+    /// 밥을 줄 때 오르는 친밀도.
     pub feed_affinity: u64,
-    pub snack_affinity: u64,
 }
 
 impl Default for Tuning {
@@ -69,8 +67,6 @@ impl Default for Tuning {
             feed_xp: 5,
             feed_xp_per_day: 3,
             snack_price: 5,
-            snack_satiety: 10.0,
-            snack_mood: 15.0,
             pet_mood: 5.0,
             pet_xp: 2,
             pet_xp_per_day: 10,
@@ -98,7 +94,6 @@ impl Default for Tuning {
             train_xp_per_day: 20,
             train_mood: 2.0,
             feed_affinity: 1,
-            snack_affinity: 2,
         }
     }
 }
@@ -276,16 +271,18 @@ impl Pet {
         self.grant_xp(t, xp)
     }
 
-    pub fn snack(&mut self, t: &Tuning) -> ActionResult {
-        if self.coins < t.snack_price {
+    /// 간식은 값을 치르고 바로 먹인다. 포만감·기분·친밀도가 오르고 XP는 주지 않는다.
+    pub fn snack(&mut self, t: &Tuning, snack: &SnackDef) -> ActionResult {
+        let price = snack.price(t);
+        if self.coins < price {
             return ActionResult::default();
         }
-        self.coins -= t.snack_price;
-        self.satiety = (self.satiety + t.snack_satiety).min(100.0);
-        self.mood = (self.mood + t.snack_mood).min(100.0);
-        self.affinity += t.snack_affinity;
+        self.coins -= price;
+        self.satiety = (self.satiety + snack.satiety).min(100.0);
+        self.mood = (self.mood + snack.mood).min(100.0);
+        self.affinity += snack.affinity;
         let mut r = self.grant_xp(t, 0);
-        r.coins -= t.snack_price;
+        r.coins -= price;
         r
     }
 
@@ -422,12 +419,31 @@ mod tests {
     #[test]
     fn snack_needs_coins_and_never_goes_negative() {
         let (mut p, t) = pet();
-        assert!(!p.snack(&t).ok);
+        let gum = &crate::shop::SNACKS[0];
+        assert!(!p.snack(&t, gum).ok);
         p.coins = 7;
-        assert!(p.snack(&t).ok);
+        assert!(p.snack(&t, gum).ok);
         assert_eq!(p.coins, 2);
-        assert!(!p.snack(&t).ok);
+        assert!(!p.snack(&t, gum).ok);
         assert_eq!(p.coins, 2);
+    }
+
+    #[test]
+    fn pricier_snacks_cost_a_multiple_and_do_more() {
+        let (mut p, mut t) = pet();
+        let cake = crate::shop::snack("cake").unwrap();
+        assert_eq!(cake.price(&t), 80);
+        // 기본 간식 가격을 바꾸면 다른 간식도 같은 비율로 따라간다.
+        t.snack_price = 10;
+        assert_eq!(cake.price(&t), 160);
+        p.coins = 160;
+        p.satiety = 10.0;
+        p.mood = 10.0;
+        let (xp, affinity) = (p.xp, p.affinity);
+        let r = p.snack(&t, cake);
+        assert!(r.ok && r.coins == -160 && p.coins == 0);
+        assert_eq!((p.satiety, p.mood), (10.0 + cake.satiety, 10.0 + cake.mood));
+        assert_eq!((p.xp, p.affinity), (xp, affinity + cake.affinity));
     }
 
     #[test]

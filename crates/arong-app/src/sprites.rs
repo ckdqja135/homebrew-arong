@@ -314,8 +314,9 @@ fn build(
                 Motion::Look => View::Front,
                 _ => View::Quarter,
             },
-            // 성견은 구르기의 첫 프레임(엎드린 자세)을 엎드려 머무는 그림으로도 쓰므로 거기에는 장식을 얹는다.
-            wearable: motion != Motion::Roll || (stage == Stage::Adult && col == 0),
+            // 성견은 구르기의 첫 두 프레임(엎드린 자세, 엎드려 입을 벌린 자세)을 엎드려 머물거나 밥 먹는 그림으로도 쓰므로
+            // 거기에는 장식을 얹는다.
+            wearable: motion != Motion::Roll || (stage == Stage::Adult && col <= 1),
         });
     }
     // 서 있는 자세가 0번이 되도록 돌린다.
@@ -415,8 +416,8 @@ mod tests {
                     assert!((y + h - GROUND).abs() <= 7.0, "{stage:?} {motion:?} {index} bottom {}", y + h);
                     // 성견의 걷기 그림은 서 있는 그림과 같은 시점이다.
                     assert_eq!(frame.view == View::Side, motion == Motion::Walk && stage != Stage::Adult);
-                    // 구르는 동안은 장식을 얹지 않는다. 성견의 첫 프레임(엎드린 자세)만 예외다.
-                    let lying = stage == Stage::Adult && motion == Motion::Roll && index == 0;
+                    // 구르는 동안은 장식을 얹지 않는다. 성견의 첫 두 프레임(엎드린 자세)만 예외다.
+                    let lying = stage == Stage::Adult && motion == Motion::Roll && index <= 1;
                     assert_eq!(frame.wearable, motion != Motion::Roll || lying, "{stage:?} {motion:?} {index}");
                 }
             }

@@ -1,7 +1,7 @@
 //! 상점: 꾸미기 아이템과 집 업그레이드. 재화는 현금 결제가 없는 로컬 게임 내 재화다.
 //! 가격은 조정 가능한 초기값.
 
-use crate::pet::Pet;
+use crate::pet::{Pet, Tuning};
 
 /// 착용 부위. 부위마다 하나씩만 착용한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,7 +53,7 @@ const fn def(id: &'static str, name: &'static str, price: i64, slot: Slot) -> It
     ItemDef { id, name, price, slot }
 }
 
-pub const ITEMS: [ItemDef; 97] = [
+pub const ITEMS: [ItemDef; 102] = [
     def("party", "파티 고깔", 60, Slot::Hat),
     def("beanie", "빨간 비니", 150, Slot::Hat),
     def("straw", "밀짚모자", 200, Slot::Hat),
@@ -151,6 +151,11 @@ pub const ITEMS: [ItemDef; 97] = [
     def("red_sandals", "빨강 샌들", 220, Slot::Shoes),
     def("blue_sandals", "파랑 샌들", 220, Slot::Shoes),
     def("pink_sandals", "분홍 샌들", 220, Slot::Shoes),
+    def("black_oxfords", "검정 구두", 300, Slot::Shoes),
+    def("brown_oxfords", "갈색 구두", 300, Slot::Shoes),
+    def("wine_oxfords", "와인 구두", 300, Slot::Shoes),
+    def("white_oxfords", "흰 구두", 320, Slot::Shoes),
+    def("red_oxfords", "빨강 구두", 320, Slot::Shoes),
 ];
 
 /// 집 단계 이름. 0은 집 없음.
@@ -161,6 +166,44 @@ pub const MAX_HOUSE_LEVEL: u32 = HOUSE_PRICES.len() as u32;
 
 pub fn item(id: &str) -> Option<&'static ItemDef> {
     ITEMS.iter().find(|i| i.id == id)
+}
+
+/// 간식. 고르면 값을 치르고 바로 먹인다(쌓아 두지 않는다).
+pub struct SnackDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// 기본 간식 가격(`Tuning::snack_price`)의 몇 배인지.
+    pub price_x: i64,
+    pub satiety: f64,
+    pub mood: f64,
+    pub affinity: u64,
+}
+
+impl SnackDef {
+    pub fn price(&self, t: &Tuning) -> i64 {
+        t.snack_price * self.price_x
+    }
+}
+
+const fn treat(id: &'static str, name: &'static str, price_x: i64, satiety: f64, mood: f64, affinity: u64) -> SnackDef {
+    SnackDef { id, name, price_x, satiety, mood, affinity }
+}
+
+/// 첫 번째가 기본 간식이다. 비쌀수록 더 많이 오르지만 재화당 효율은 낮아진다.
+pub const SNACKS: [SnackDef; 9] = [
+    treat("gum", "개껌", 1, 10.0, 15.0, 2),
+    treat("carrot", "당근", 2, 18.0, 12.0, 2),
+    treat("sweet_potato", "고구마", 3, 28.0, 16.0, 3),
+    treat("jerky", "육포", 4, 15.0, 30.0, 4),
+    treat("cheese", "치즈", 5, 12.0, 38.0, 5),
+    treat("bone", "고기 뼈다귀", 6, 20.0, 40.0, 6),
+    treat("drumstick", "닭다리", 8, 40.0, 35.0, 7),
+    treat("puppuccino", "멍푸치노", 10, 15.0, 60.0, 8),
+    treat("cake", "생일 케이크", 16, 45.0, 70.0, 12),
+];
+
+pub fn snack(id: &str) -> Option<&'static SnackDef> {
+    SNACKS.iter().find(|s| s.id == id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
